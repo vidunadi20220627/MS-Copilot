@@ -216,3 +216,9 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+echo "chroma_data/" >> .gitignore
+echo "log-files/" >> .gitignore
+echo "*.db" >> .gitignore
+echo ".DS_Store" >> .gitignore
+echo "postgres_data/" >> .gitignore
