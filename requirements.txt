@@ -1,0 +1,14 @@
+fastapi
+uvicorn
+python-dotenv
+langgraph
+langchain
+langchain-openai
+openai
+chromadb
+PyPDF2
+requests
+pydantic
+sentence-transformers
+pytest
+httpx
