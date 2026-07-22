@@ -2,5 +2,6 @@ from typing import TypedDict, Optional
 
 class AgentState(TypedDict):
     question: str
-    question_type: Optional[str]   # "wording" or "schedule"
+    policy_no: Optional[str]
+    question_type: Optional[str]  # "wording", "schedule", "transaction"
     final_answer: Optional[str]
