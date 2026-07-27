@@ -6,7 +6,6 @@ from tools.vanna_tool import answer_from_db
 from openai import OpenAI
 from config.settings import OPENAI_API_KEY
 import json
-import re
 
 client = OpenAI(api_key=OPENAI_API_KEY)
 
@@ -14,6 +13,7 @@ def classify_question(state: AgentState) -> AgentState:
     """Classify question type and extract policy number"""
     response = client.chat.completions.create(
         model="gpt-4o",
+        response_format={"type": "json_object"},
         messages=[
             {
                 "role": "system",
@@ -28,7 +28,8 @@ def classify_question(state: AgentState) -> AgentState:
                 schedule   → coverage dates, premium amount, insured persons,
                              benefit limits, GST, area of cover
                 transaction → payments, transaction history, payment status,
-                              payment method, failed payments, amounts
+                              payment method, failed payments, amounts,
+                              customer details tied to a policy
 
                 Return ONLY the JSON. Nothing else."""
             },
@@ -39,9 +40,15 @@ def classify_question(state: AgentState) -> AgentState:
         ]
     )
 
-    result = json.loads(response.choices[0].message.content)
-    state["question_type"] = result.get("type", "transaction")
-    state["policy_no"] = result.get("policy_no")
+    try:
+        result = json.loads(response.choices[0].message.content)
+        state["question_type"] = result.get("type", "transaction")
+        state["policy_no"] = result.get("policy_no")
+    except Exception as e:
+        print(f"Classification parse error: {e}")
+        state["question_type"] = "transaction"
+        state["policy_no"] = None
+
     return state
 
 def route_question(state: AgentState) -> str:
@@ -63,6 +70,10 @@ def call_pdf_tool(state: AgentState) -> AgentState:
 
 def call_schedule_tool(state: AgentState) -> AgentState:
     """Call policy schedule tool"""
+    if not state.get("policy_no"):
+        state["final_answer"] = "Please provide the policy number to look up the schedule."
+        return state
+
     answer = answer_from_schedule(
         question=state["question"],
         policy_no=state["policy_no"]

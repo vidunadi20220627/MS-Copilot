@@ -1,6 +1,7 @@
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 from agents.supervisor import run_supervisor
+import traceback
 
 router = APIRouter()
 
@@ -13,24 +14,14 @@ class ChatResponse(BaseModel):
 
 @router.post("/chat", response_model=ChatResponse)
 async def chat(request: ChatRequest):
-    """Main chat endpoint"""
     if not request.question or request.question.strip() == "":
-        raise HTTPException(
-            status_code=400,
-            detail="Question cannot be empty"
-        )
-
+        raise HTTPException(status_code=400, detail="Question cannot be empty")
     try:
         answer = run_supervisor(request.question)
-        return ChatResponse(
-            question=request.question,
-            answer=answer
-        )
+        return ChatResponse(question=request.question, answer=answer)
     except Exception as e:
-        raise HTTPException(
-            status_code=500,
-            detail=f"Error processing question: {str(e)}"
-        )
+        traceback.print_exc()   # ← prints full error to terminal
+        raise HTTPException(status_code=500, detail=f"Error processing question: {str(e)}")
 
 @router.get("/health")
 async def health_check():

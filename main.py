@@ -23,10 +23,30 @@ app.include_router(api_router)
 
 @app.on_event("startup")
 async def startup_event():
-    """Run on app startup"""
     print("Starting Ergo AI Assistant...")
-    test_connection()    # test MySQL connection
-    setup_vanna()        # setup and train Vanna
+
+    db_ok = test_connection()
+    if not db_ok:
+        print("⚠️  WARNING: DB not reachable at startup — transaction queries will fail until DB connects. Wording/schedule tools are unaffected.")
+
+    try:
+        setup_vanna()
+    except Exception as e:
+        print(f"⚠️  WARNING: Vanna setup failed — transaction tool disabled for now: {e}")
+>>>>>>> ff4b7b1 (connect db)
+
+@app.on_event("startup")
+async def startup_event():
+    print("Starting Ergo AI Assistant...")
+
+    db_ok = test_connection()
+    if not db_ok:
+        print("⚠️  WARNING: DB not reachable at startup — transaction queries will fail until DB connects. Wording/schedule tools are unaffected.")
+
+    try:
+        setup_vanna()
+    except Exception as e:
+        print(f"⚠️  WARNING: Vanna setup failed — transaction tool disabled for now: {e}")
 
 @app.get("/")
 async def root():
