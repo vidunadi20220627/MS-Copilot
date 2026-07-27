@@ -1,6 +1,7 @@
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 from agents.supervisor import run_supervisor
+from db.connection import test_connection
 import traceback
 
 router = APIRouter()
@@ -27,3 +28,9 @@ async def chat(request: ChatRequest):
 async def health_check():
     """Health check endpoint"""
     return {"status": "ok", "message": "AI Assistant is running"}
+
+
+@router.get("/db-health")
+async def db_health_check():
+    connected = test_connection()
+    return {"db_connected": connected}    
