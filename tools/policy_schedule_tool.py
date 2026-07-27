@@ -8,7 +8,7 @@ from config.settings import (
     POLICY_DOCUMENT_API_URL,
     OPENAI_API_KEY
 )
-from db.connection import get_policy_wording_credentials
+from db.connection import get_policy_credentials_by_no
 
 client = OpenAI(api_key=OPENAI_API_KEY)
 
@@ -40,19 +40,20 @@ def decode_base64_to_text(base64_string: str) -> Optional[str]:
 def answer_from_schedule(question: str, policy_no: str) -> str:
     """
     Main function called by agent
-    Now gets credentials from DB view
+    Only called when user provides a policy number
+    Gets credentials for that specific policy from DB
     """
-    # Get credentials from DB view
-    credentials = get_policy_wording_credentials(policy_no)
+    # Get credentials for specific policy
+    credentials = get_policy_credentials_by_no(policy_no)
     if not credentials:
-        return f"Sorry, I could not find policy {policy_no} in the system."
+        return f"Sorry, I could not find policy {policy_no} in the system. Please check the policy number and try again."
 
     access_token = credentials["access_token"]
 
     # Fetch schedule
     base64_string = fetch_schedule_base64(policy_no, access_token)
     if not base64_string:
-        return "Sorry, I could not retrieve the policy schedule."
+        return f"Sorry, I could not retrieve the policy schedule for {policy_no}."
 
     # Decode to text
     schedule_text = decode_base64_to_text(base64_string)
@@ -67,12 +68,13 @@ def answer_from_schedule(question: str, policy_no: str) -> str:
                 "role": "system",
                 "content": """You are a helpful insurance assistant.
                 Answer the user question using only the provided
-                policy schedule content. Be clear and concise."""
+                policy schedule content. Be clear and concise.
+                If the answer is not in the schedule say so."""
             },
             {
                 "role": "user",
                 "content": f"""
-                Policy Schedule:
+                Policy Schedule for {policy_no}:
                 {schedule_text}
 
                 Question: {question}
@@ -80,4 +82,5 @@ def answer_from_schedule(question: str, policy_no: str) -> str:
             }
         ]
     )
+
     return response.choices[0].message.content
