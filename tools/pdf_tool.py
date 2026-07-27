@@ -2,7 +2,6 @@ import requests
 import base64
 import PyPDF2
 import io
-import hashlib
 from typing import Optional
 from openai import OpenAI
 from vector_store.chroma import (
@@ -11,10 +10,12 @@ from vector_store.chroma import (
     collection_exists
 )
 from config.settings import (
-    HARDCODED_POLICY_NO,
-    HARDCODED_ACCESS_TOKEN,
     POLICY_DOCUMENT_API_URL,
     OPENAI_API_KEY
+)
+from db.connection import (
+    get_latest_policy_wording_credentials,
+    get_policy_credentials_by_no
 )
 
 client = OpenAI(api_key=OPENAI_API_KEY)
@@ -70,28 +71,21 @@ def index_pdf(policy_no: str, access_token: str) -> bool:
     """Fetch PDF, extract text, chunk, embed and store in ChromaDB"""
     print(f"Indexing PDF for policy {policy_no}...")
 
-    # Fetch PDF
     base64_string = fetch_pdf_base64(policy_no, access_token)
     if not base64_string:
         return False
 
-    # Decode to text
     text = decode_base64_to_text(base64_string)
     if not text:
         return False
 
-    # Chunk text
     chunks = chunk_text(text)
     print(f"Created {len(chunks)} chunks")
 
-    # Clear old collection if exists
     collection_name = f"policy_wording_{policy_no}"
     delete_collection(collection_name)
-
-    # Get or create collection
     collection = get_or_create_collection(collection_name)
 
-    # Embed and store chunks
     for i, chunk in enumerate(chunks):
         embedding = get_embedding(chunk)
         collection.add(
@@ -100,20 +94,17 @@ def index_pdf(policy_no: str, access_token: str) -> bool:
             ids=[f"chunk_{i}"]
         )
 
-    # Save token to cache
     indexed_tokens[policy_no] = access_token
     print(f"PDF indexed successfully ✅ ({len(chunks)} chunks)")
     return True
 
 def should_reindex(policy_no: str, access_token: str) -> bool:
-    """Check if PDF needs re-indexing based on token change"""
+    """Check if PDF needs re-indexing"""
     collection_name = f"policy_wording_{policy_no}"
 
-    # Not indexed yet
     if not collection_exists(collection_name):
         return True
 
-    # Token changed means wording updated
     if indexed_tokens.get(policy_no) != access_token:
         return True
 
@@ -132,19 +123,41 @@ def search_pdf(policy_no: str, question: str, top_k: int = 3) -> Optional[str]:
     )
 
     if results and results["documents"]:
-        chunks = results["documents"][0]
-        return "\n\n".join(chunks)
+        return "\n\n".join(results["documents"][0])
 
     return None
 
-def answer_from_pdf(question: str) -> str:
+def answer_from_pdf(question: str, policy_no: Optional[str] = None) -> str:
     """
     Main function called by agent
-    Uses hardcoded policy_no and token for demo
-    TODO: Replace with DB query after demo
+
+    Two scenarios:
+    1. policy_no is None
+       → No policy number in question
+       → Get LATEST policy wording from DB
+       → Use that policy_no and token
+
+    2. policy_no is provided
+       → User gave specific policy number
+       → Get credentials for THAT policy from DB
+       → Use that specific policy wording
     """
-    policy_no = HARDCODED_POLICY_NO
-    access_token = HARDCODED_ACCESS_TOKEN
+
+    if policy_no is None:
+        # Scenario 1 — no policy number — get latest
+        print("No policy number provided — fetching latest wording")
+        credentials = get_latest_policy_wording_credentials()
+        if not credentials:
+            return "Sorry, I could not find any active policy wording in the system."
+        policy_no = credentials["policy_no"]
+        access_token = credentials["access_token"]
+    else:
+        # Scenario 2 — specific policy number given
+        print(f"Policy number provided — fetching wording for {policy_no}")
+        credentials = get_policy_credentials_by_no(policy_no)
+        if not credentials:
+            return f"Sorry, I could not find policy {policy_no} in the system. Please check the policy number and try again."
+        access_token = credentials["access_token"]
 
     # Re-index if needed
     if should_reindex(policy_no, access_token):
@@ -157,15 +170,16 @@ def answer_from_pdf(question: str) -> str:
     if not relevant_chunks:
         return "Sorry, I could not find relevant information in the policy wording."
 
-    # Generate answer using OpenAI
+    # Generate answer
     response = client.chat.completions.create(
         model="gpt-4o",
         messages=[
             {
                 "role": "system",
-                "content": """You are a helpful insurance assistant. 
-                Answer the user's question using only the provided 
-                policy wording context. Be clear and concise."""
+                "content": """You are a helpful insurance assistant.
+                Answer the user question using only the provided
+                policy wording context. Be clear and concise.
+                If the answer is not in the context say so."""
             },
             {
                 "role": "user",
@@ -174,8 +188,6 @@ def answer_from_pdf(question: str) -> str:
                 {relevant_chunks}
 
                 Question: {question}
-
-                Answer based only on the context provided.
                 """
             }
         ]

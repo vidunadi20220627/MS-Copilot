@@ -12,3 +12,6 @@ pydantic
 sentence-transformers
 pytest
 httpx
+pymysql
+sqlalchemy
+vanna[openai,chromadb]==0.7.9
