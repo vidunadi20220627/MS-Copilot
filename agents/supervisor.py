@@ -8,7 +8,11 @@ from config.settings import OPENAI_API_KEY
 import json
 import re
 
-client = OpenAI(api_key=OPENAI_API_KEY)
+client = OpenAI(
+    api_key=OPENAI_API_KEY,
+    max_retries=3,
+    timeout=20.0
+)
 
 # ── Product code prefixes for policy number validation ──────────────
 # TODO: Add all product codes here when received
@@ -56,51 +60,42 @@ def classify_question(state: AgentState) -> AgentState:
     state["has_policy_no"] = policy_no is not None
 
     # Ask GPT if question is insurance related
-    response = client.chat.completions.create(
-        model="gpt-4o",
-        messages=[
-            {
-                "role": "system",
-                "content": """You are a classifier for an insurance AI assistant.
+def classify_question(state: AgentState) -> AgentState:
+    question = state["question"]
+    policy_no = extract_policy_no(question)
+    state["policy_no"] = policy_no
+    state["has_policy_no"] = policy_no is not None
 
+    try:
+        response = client.chat.completions.create(
+            model="gpt-4o",
+            response_format={"type": "json_object"},
+            messages=[
+                {"role": "system", "content": """You are a classifier for an insurance AI assistant.
                 Analyze the question and return ONLY a JSON object:
-                {
-                    "is_relevant": true or false
-                }
-
+                {"is_relevant": true or false}
                 is_relevant = true ONLY if the question is about:
                 → Insurance policy terms, conditions, coverage, exclusions
                 → Policy schedule details (dates, premium, benefits, insured persons)
                 → Payment transactions, payment history, payment status
                 → Claims related questions
                 → General insurance product questions
+                is_relevant = false if the question is about anything else.
+                Return ONLY the JSON. Nothing else."""},
+                {"role": "user", "content": question}
+            ]
+        )
+        content = response.choices[0].message.content
+        result = json.loads(content) if content else {}
+        state["is_relevant"] = result.get("is_relevant", False)
+    except Exception as e:
+        print(f"Classification failed: {e}")
+        state["is_relevant"] = None
 
-                is_relevant = false if the question is about:
-                → Anything not related to insurance
-                → General knowledge (weather, sports, cooking etc)
-                → Coding, technology, math, science
-                → Politics, entertainment, news
-
-                Return ONLY the JSON. Nothing else."""
-            },
-            {
-                "role": "user",
-                "content": question
-            }
-        ]
-    )
-
-    result = json.loads(response.choices[0].message.content)
-    state["is_relevant"] = result.get("is_relevant", False)
-
-    # Set question type based on whether policy no is present
-    if state["is_relevant"]:
-        if state["has_policy_no"]:
-            # Policy number found → access both wording and schedule
-            state["question_type"] = "wording_and_schedule"
-        else:
-            # No policy number → access latest policy wording only
-            state["question_type"] = "wording_only"
+    if state["is_relevant"] is None:
+        state["question_type"] = "error"
+    elif state["is_relevant"]:
+        state["question_type"] = "wording_and_schedule" if state["has_policy_no"] else "wording_only"
     else:
         state["question_type"] = None
 

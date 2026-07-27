@@ -28,4 +28,4 @@ def delete_collection(collection_name: str):
 def collection_exists(collection_name: str) -> bool:
     client = get_chroma_client()
     collections = client.list_collections()
-    return any(col.name == collection_name for col in collections)
+    return collection_name in collections

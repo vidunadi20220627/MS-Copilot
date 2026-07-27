@@ -18,7 +18,11 @@ from db.connection import (
     get_policy_credentials_by_no
 )
 
-client = OpenAI(api_key=OPENAI_API_KEY)
+client = OpenAI(
+    api_key=OPENAI_API_KEY,
+    max_retries=3,
+    timeout=20.0
+)
 
 # Cache to track indexed tokens
 # Key: policy_no, Value: last indexed token

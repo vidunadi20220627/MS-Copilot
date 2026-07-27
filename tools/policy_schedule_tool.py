@@ -10,7 +10,11 @@ from config.settings import (
 )
 from db.connection import get_policy_credentials_by_no
 
-client = OpenAI(api_key=OPENAI_API_KEY)
+client = OpenAI(
+    api_key=OPENAI_API_KEY,
+    max_retries=3,
+    timeout=20.0
+)
 
 def fetch_schedule_base64(policy_no: str, access_token: str) -> Optional[str]:
     """Call API and get Base64 encoded policy schedule"""

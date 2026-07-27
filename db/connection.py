@@ -38,7 +38,7 @@ def get_latest_policy_wording_credentials() -> dict:
     """
     query = text("""
         SELECT policy_no, access_token
-        FROM vw_policy_wording_access
+        FROM view_policy_wording_schedule
         WHERE status = 'A'
         AND trans_type = 'NB'
         AND product = 'TPS'
@@ -68,7 +68,7 @@ def get_policy_credentials_by_no(policy_no: str) -> dict:
     """
     query = text("""
         SELECT policy_no, access_token
-        FROM vw_policy_wording_access
+        FROM view_policy_wording_schedule
         WHERE policy_no = :policy_no
         AND status = 'A'
         AND trans_type = 'NB'
