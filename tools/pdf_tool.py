@@ -13,11 +13,15 @@ from config.settings import (
     POLICY_DOCUMENT_API_URL,
     OPENAI_API_KEY
 )
-from db.connection import get_policy_wording_credentials
+from db.connection import (
+    get_latest_policy_wording_credentials,
+    get_policy_credentials_by_no
+)
 
 client = OpenAI(api_key=OPENAI_API_KEY)
 
 # Cache to track indexed tokens
+# Key: policy_no, Value: last indexed token
 indexed_tokens: dict = {}
 
 def fetch_pdf_base64(policy_no: str, access_token: str) -> Optional[str]:
@@ -66,16 +70,22 @@ def get_embedding(text: str) -> list:
 def index_pdf(policy_no: str, access_token: str) -> bool:
     """Fetch PDF, extract text, chunk, embed and store in ChromaDB"""
     print(f"Indexing PDF for policy {policy_no}...")
+
     base64_string = fetch_pdf_base64(policy_no, access_token)
     if not base64_string:
         return False
+
     text = decode_base64_to_text(base64_string)
     if not text:
         return False
+
     chunks = chunk_text(text)
+    print(f"Created {len(chunks)} chunks")
+
     collection_name = f"policy_wording_{policy_no}"
     delete_collection(collection_name)
     collection = get_or_create_collection(collection_name)
+
     for i, chunk in enumerate(chunks):
         embedding = get_embedding(chunk)
         collection.add(
@@ -83,43 +93,71 @@ def index_pdf(policy_no: str, access_token: str) -> bool:
             embeddings=[embedding],
             ids=[f"chunk_{i}"]
         )
+
     indexed_tokens[policy_no] = access_token
-    print(f"PDF indexed successfully ✅")
+    print(f"PDF indexed successfully ✅ ({len(chunks)} chunks)")
     return True
 
 def should_reindex(policy_no: str, access_token: str) -> bool:
     """Check if PDF needs re-indexing"""
     collection_name = f"policy_wording_{policy_no}"
+
     if not collection_exists(collection_name):
         return True
+
     if indexed_tokens.get(policy_no) != access_token:
         return True
+
     return False
 
 def search_pdf(policy_no: str, question: str, top_k: int = 3) -> Optional[str]:
     """Search ChromaDB for relevant chunks"""
     collection_name = f"policy_wording_{policy_no}"
     collection = get_or_create_collection(collection_name)
+
     question_embedding = get_embedding(question)
+
     results = collection.query(
         query_embeddings=[question_embedding],
         n_results=top_k
     )
+
     if results and results["documents"]:
         return "\n\n".join(results["documents"][0])
+
     return None
 
-def answer_from_pdf(question: str, policy_no: str) -> str:
+def answer_from_pdf(question: str, policy_no: Optional[str] = None) -> str:
     """
     Main function called by agent
-    Now gets credentials from DB view
-    """
-    # Get credentials from DB view
-    credentials = get_policy_wording_credentials(policy_no)
-    if not credentials:
-        return f"Sorry, I could not find policy {policy_no} in the system."
 
-    access_token = credentials["access_token"]
+    Two scenarios:
+    1. policy_no is None
+       → No policy number in question
+       → Get LATEST policy wording from DB
+       → Use that policy_no and token
+
+    2. policy_no is provided
+       → User gave specific policy number
+       → Get credentials for THAT policy from DB
+       → Use that specific policy wording
+    """
+
+    if policy_no is None:
+        # Scenario 1 — no policy number — get latest
+        print("No policy number provided — fetching latest wording")
+        credentials = get_latest_policy_wording_credentials()
+        if not credentials:
+            return "Sorry, I could not find any active policy wording in the system."
+        policy_no = credentials["policy_no"]
+        access_token = credentials["access_token"]
+    else:
+        # Scenario 2 — specific policy number given
+        print(f"Policy number provided — fetching wording for {policy_no}")
+        credentials = get_policy_credentials_by_no(policy_no)
+        if not credentials:
+            return f"Sorry, I could not find policy {policy_no} in the system. Please check the policy number and try again."
+        access_token = credentials["access_token"]
 
     # Re-index if needed
     if should_reindex(policy_no, access_token):
@@ -140,7 +178,8 @@ def answer_from_pdf(question: str, policy_no: str) -> str:
                 "role": "system",
                 "content": """You are a helpful insurance assistant.
                 Answer the user question using only the provided
-                policy wording context. Be clear and concise."""
+                policy wording context. Be clear and concise.
+                If the answer is not in the context say so."""
             },
             {
                 "role": "user",
@@ -153,4 +192,5 @@ def answer_from_pdf(question: str, policy_no: str) -> str:
             }
         ]
     )
+
     return response.choices[0].message.content
