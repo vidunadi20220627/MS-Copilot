@@ -64,16 +64,21 @@ def answer_from_schedule(question: str, policy_no: str) -> str:
     if not schedule_text:
         return "Sorry, I could not read the policy schedule."
 
-    # Generate answer
+        # Generate answer
     response = client.chat.completions.create(
         model="gpt-4o",
         messages=[
             {
                 "role": "system",
-                "content": """You are a helpful insurance assistant.
-                Answer the user question using only the provided
-                policy schedule content. Be clear and concise.
-                If the answer is not in the schedule say so."""
+                "content": """You are an insurance assistant for brokers.
+                Answer using ONLY the provided policy schedule content.
+
+                Format rules:
+                - If the answer has more than one distinct point (e.g. multiple benefits, multiple dates), use short bullet points (start each with "- ")
+                - If it's a single fact, answer in one short sentence — no bullets needed
+                - No preamble, no repeating the question
+                - Each bullet should be one short phrase, not a paragraph
+                - If the answer is not in the schedule, say so in one line"""
             },
             {
                 "role": "user",
