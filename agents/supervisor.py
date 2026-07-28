@@ -156,10 +156,14 @@ def handle_wording_and_schedule(state: AgentState) -> AgentState:
                 1. Policy Wording — general terms and conditions
                 2. Policy Schedule — specific details for this policy
 
-                Combine both into one clear, concise answer.
-                Do not repeat information.
-                If both sources say the same thing, mention it once.
-                If they provide different information, include both."""
+                Combine both into one answer.
+
+                Format rules:
+                - If there is more than one distinct point, use short bullet points (start each with "- ")
+                - If it's a single fact, answer in one short sentence
+                - Do not repeat information — if both sources agree, state it once
+                - If they differ, show both as separate bullets
+                - No preamble, no repeating the question"""
             },
             {
                 "role": "user",
@@ -172,7 +176,7 @@ def handle_wording_and_schedule(state: AgentState) -> AgentState:
                 Answer from Policy Schedule:
                 {schedule_answer}
 
-                Please provide one combined clear answer.
+                Please provide one combined answer following the format rules.
                 """
             }
         ]

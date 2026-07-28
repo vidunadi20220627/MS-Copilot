@@ -180,10 +180,15 @@ def answer_from_pdf(question: str, policy_no: Optional[str] = None) -> str:
         messages=[
             {
                 "role": "system",
-                "content": """You are a helpful insurance assistant.
-                Answer the user question using only the provided
-                policy wording context. Be clear and concise.
-                If the answer is not in the context say so."""
+                "content": """You are an insurance assistant for brokers.
+                Answer using ONLY the provided policy wording context.
+
+                Format rules:
+                - If the answer has more than one distinct point, use short bullet points (start each with "- ")
+                - If it's a single fact (one date, one amount, one yes/no), answer in one short sentence — no bullets needed
+                - No preamble, no "based on the document", no repeating the question
+                - Each bullet should be one short phrase or sentence, not a paragraph
+                - If the context doesn't contain the answer, say so in one line — do not guess"""
             },
             {
                 "role": "user",
