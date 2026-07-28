@@ -61,46 +61,114 @@ def classify_question(state: AgentState) -> AgentState:
 
     # Ask GPT if question is insurance related
 def classify_question(state: AgentState) -> AgentState:
+    """
+    Step 1: Check if question is insurance related
+    Step 2: Extract policy number if present
+    Step 3: Determine question type based on policy number
+    """
     question = state["question"]
+
+    # Extract policy number first
     policy_no = extract_policy_no(question)
     state["policy_no"] = policy_no
     state["has_policy_no"] = policy_no is not None
 
+    # Ask GPT if question is insurance related
     try:
         response = client.chat.completions.create(
             model="gpt-4o",
             response_format={"type": "json_object"},
             messages=[
-                {"role": "system", "content": """You are a classifier for an insurance AI assistant.
-                Analyze the question and return ONLY a JSON object:
-                {"is_relevant": true or false}
-                is_relevant = true ONLY if the question is about:
-                → Insurance policy terms, conditions, coverage, exclusions
-                → Policy schedule details (dates, premium, benefits, insured persons)
-                → Payment transactions, payment history, payment status
-                → Claims related questions
-                → General insurance product questions
-                is_relevant = false if the question is about anything else.
-                Return ONLY the JSON. Nothing else."""},
-                {"role": "user", "content": question}
+                {
+                    "role": "system",
+                    "content": """You are a classifier for an insurance AI assistant.
+
+                    Analyze the question and return ONLY a JSON object:
+                    {"is_relevant": true or false}
+
+                    is_relevant = true if the question is about ANY of these:
+
+                    INSURANCE TOPICS:
+                    → Insurance policy terms, conditions, coverage, exclusions
+                    → Policy schedule details (dates, premium, benefits, insured persons)
+                    → Payment transactions, payment history, payment status
+                    → Claims related questions
+                    → General insurance product questions
+
+                    INSURANCE KEYWORDS — if the question contains or relates
+                    to any of these terms it is relevant:
+                    Accident, Accidental, Act of War, Administrative charges,
+                    ATM, AIDS, Acquired immune deficiency syndrome,
+                    Opportunistic infection, Malignant neoplasm,
+                    Acts of Terrorism, Country of residence,
+                    Child, Children, Common carrier,
+                    Civil unrest, Riot, Commotion,
+                    Depreciation scale, Expedition,
+                    Extreme sports, Sporting activities,
+                    Golfing equipment, Hostage,
+                    Household contents, Hospital,
+                    Hospital confinement, Insured Person,
+                    Insolvency, Injury, Jewellery, Kidnap,
+                    Laptop computer, Loss of limb,
+                    Loss of hearing, Loss of sight,
+                    Loss of speech, Dental expenses,
+                    Major travel event, Manual work,
+                    Medical expenses, Medical practitioner,
+                    Mountaineering, Natural disasters,
+                    Nuclear terrorism, Chemical terrorism,
+                    Biological terrorism, Overseas, Physician,
+                    Payment card, Partial disablement, Permanent,
+                    Pre-existing medical condition, Public place,
+                    Relative, Selected plan, Serious injury,
+                    Serious sickness, Sickness, Stolen, Strike,
+                    Total Disablement, Travel companion,
+                    Travel agent, Trip, Valuables, War,
+                    Area of Cover, Individual Cover,
+                    Adult and Child Cover, Family Cover,
+                    Multiple Individuals, ERGO Assistance,
+                    Chronic, Claim, COVID-19, ERGO,
+                    Policy, Premium, Coverage, Benefit,
+                    Exclusion, Deductible, Endorsement,
+                    Grace period, Lapse, Renewal, Reinstatement,
+                    Sum assured, Sum insured, Repatriation,
+                    Evacuation, Baggage, Passport, Flight delay,
+                    Trip cancellation, Trip curtailment
+
+                    is_relevant = false ONLY if the question is completely
+                    unrelated to insurance such as:
+                    → General knowledge (weather, sports, cooking etc)
+                    → Coding, technology, math, science
+                    → Politics, entertainment, news
+                    → Personal advice unrelated to insurance
+
+                    Return ONLY the JSON object. Nothing else."""
+                },
+                {
+                    "role": "user",
+                    "content": question
+                }
             ]
         )
-        content = response.choices[0].message.content
-        result = json.loads(content) if content else {}
-        state["is_relevant"] = result.get("is_relevant", False)
-    except Exception as e:
-        print(f"Classification failed: {e}")
-        state["is_relevant"] = None
 
-    if state["is_relevant"] is None:
-        state["question_type"] = "error"
-    elif state["is_relevant"]:
-        state["question_type"] = "wording_and_schedule" if state["has_policy_no"] else "wording_only"
+        result = json.loads(response.choices[0].message.content)
+        state["is_relevant"] = result.get("is_relevant", False)
+
+    except Exception as e:
+        print(f"Classification error: {e}")
+        # Default to relevant if classification fails
+        # Better to answer than to wrongly block
+        state["is_relevant"] = True
+
+    # Set question type based on whether policy no is present
+    if state["is_relevant"]:
+        if state["has_policy_no"]:
+            state["question_type"] = "wording_and_schedule"
+        else:
+            state["question_type"] = "wording_only"
     else:
         state["question_type"] = None
 
     return state
-
 def route_question(state: AgentState) -> str:
     """Route to correct handler based on classification"""
     if not state["is_relevant"]:
