@@ -3,47 +3,47 @@ from agents.state import AgentState
 from tools.pdf_tool import answer_from_pdf
 from tools.policy_schedule_tool import answer_from_schedule
 from openai import OpenAI
-from typing import Optional
 from config.settings import OPENAI_API_KEY
 import json
 import re
+import logging
 
-client = OpenAI(
-    api_key=OPENAI_API_KEY,
-    max_retries=3,
-    timeout=20.0
+# ── Logging Setup ────────────────────────────────────────────────────
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
+    handlers=[
+        logging.StreamHandler(),                          # prints to terminal
+        logging.FileHandler("logs/supervisor.log")        # saves to file
+    ]
 )
+logger = logging.getLogger("supervisor")
 
-# ── Product code prefixes for policy number validation ──────────────
+# ── Product code prefixes for policy number validation ───────────────
 # TODO: Add all product codes here when received
-# Example format: "DTPS", "DPAI", "DTHA" etc
-# These are the valid prefixes at the START of a policy number
 VALID_PRODUCT_CODES = [
     "DTPS",  # Travel Per Trip
     "DPAI",  # Personal Accident
     # TODO: add more product codes here
-    # "DTHA",
-    # "DMOT",
-    # etc
 ]
 
-def extract_policy_no(question: str) -> Optional[str]:
+def extract_policy_no(question: str):
     """
     Extract policy number from user question
     Validates using product code prefixes
     Returns policy_no if found and valid, None otherwise
     """
-    # Convert to uppercase for matching
     question_upper = question.upper()
 
-    # Build regex pattern from valid product codes
-    # Matches pattern like DTPS26043904 or DPAI26402372
     for code in VALID_PRODUCT_CODES:
         pattern = rf'\b({code}[A-Z0-9]{{6,}})\b'
         match = re.search(pattern, question_upper)
         if match:
-            return match.group(1)
+            found = match.group(1)
+            logger.info(f"[POLICY NO EXTRACTION] Found policy number: {found}")
+            return found
 
+    logger.info("[POLICY NO EXTRACTION] No valid policy number found in question")
     return None
 
 def classify_question(state: AgentState) -> AgentState:
@@ -53,25 +53,14 @@ def classify_question(state: AgentState) -> AgentState:
     Step 3: Determine question type based on policy number
     """
     question = state["question"]
+    logger.info(f"[CLASSIFIER] Incoming question: {question}")
 
     # Extract policy number first
     policy_no = extract_policy_no(question)
     state["policy_no"] = policy_no
     state["has_policy_no"] = policy_no is not None
 
-    # Ask GPT if question is insurance related
-def classify_question(state: AgentState) -> AgentState:
-    """
-    Step 1: Check if question is insurance related
-    Step 2: Extract policy number if present
-    Step 3: Determine question type based on policy number
-    """
-    question = state["question"]
-
-    # Extract policy number first
-    policy_no = extract_policy_no(question)
-    state["policy_no"] = policy_no
-    state["has_policy_no"] = policy_no is not None
+    logger.info(f"[CLASSIFIER] Policy number found: {policy_no}")
 
     # Ask GPT if question is insurance related
     try:
@@ -152,14 +141,13 @@ def classify_question(state: AgentState) -> AgentState:
 
         result = json.loads(response.choices[0].message.content)
         state["is_relevant"] = result.get("is_relevant", False)
+        logger.info(f"[CLASSIFIER] GPT classification result: {result}")
 
     except Exception as e:
-        print(f"Classification error: {e}")
-        # Default to relevant if classification fails
-        # Better to answer than to wrongly block
+        logger.error(f"[CLASSIFIER] Classification error: {e}")
         state["is_relevant"] = True
 
-    # Set question type based on whether policy no is present
+    # Set question type
     if state["is_relevant"]:
         if state["has_policy_no"]:
             state["question_type"] = "wording_and_schedule"
@@ -168,16 +156,23 @@ def classify_question(state: AgentState) -> AgentState:
     else:
         state["question_type"] = None
 
+    logger.info(f"[CLASSIFIER] is_relevant={state['is_relevant']} | question_type={state['question_type']}")
+
     return state
+
 def route_question(state: AgentState) -> str:
     """Route to correct handler based on classification"""
+    route = "blocked"
+
     if not state["is_relevant"]:
-        return "blocked"
-    if state["question_type"] == "wording_and_schedule":
-        return "wording_and_schedule"
-    if state["question_type"] == "wording_only":
-        return "wording_only"
-    return "blocked"
+        route = "blocked"
+    elif state["question_type"] == "wording_and_schedule":
+        route = "wording_and_schedule"
+    elif state["question_type"] == "wording_only":
+        route = "wording_only"
+
+    logger.info(f"[ROUTER] Routing to: {route}")
+    return route
 
 def handle_wording_only(state: AgentState) -> AgentState:
     """
@@ -185,10 +180,15 @@ def handle_wording_only(state: AgentState) -> AgentState:
     Get LATEST policy wording from DB view
     Answer only from wording document
     """
+    logger.info("[WORDING ONLY] Handling wording only question")
+    logger.info("[WORDING ONLY] No policy number — will fetch latest wording from DB")
+
     answer = answer_from_pdf(
         question=state["question"],
-        policy_no=None  # None means get latest from DB
+        policy_no=None
     )
+
+    logger.info(f"[WORDING ONLY] Answer received: {answer[:200]}...")
     state["final_answer"] = answer
     return state
 
@@ -201,60 +201,72 @@ def handle_wording_and_schedule(state: AgentState) -> AgentState:
     policy_no = state["policy_no"]
     question = state["question"]
 
+    logger.info(f"[WORDING AND SCHEDULE] Handling combined question for policy: {policy_no}")
+
     # Get answer from policy wording
+    logger.info(f"[WORDING AND SCHEDULE] Fetching policy wording for {policy_no}")
     wording_answer = answer_from_pdf(
         question=question,
         policy_no=policy_no
     )
+    logger.info(f"[WORDING AND SCHEDULE] Wording answer: {wording_answer[:200]}...")
 
     # Get answer from policy schedule
+    logger.info(f"[WORDING AND SCHEDULE] Fetching policy schedule for {policy_no}")
     schedule_answer = answer_from_schedule(
         question=question,
         policy_no=policy_no
     )
+    logger.info(f"[WORDING AND SCHEDULE] Schedule answer: {schedule_answer[:200]}...")
 
     # Combine both answers using GPT
-    response = client.chat.completions.create(
-        model="gpt-4o",
-        messages=[
-            {
-                "role": "system",
-                "content": """You are a helpful insurance assistant.
-                You have been given information from two sources:
-                1. Policy Wording — general terms and conditions
-                2. Policy Schedule — specific details for this policy
+    logger.info("[WORDING AND SCHEDULE] Combining both answers with GPT")
+    try:
+        response = client.chat.completions.create(
+            model="gpt-4o",
+            messages=[
+                {
+                    "role": "system",
+                    "content": """You are a helpful insurance assistant.
+                    You have been given information from two sources:
+                    1. Policy Wording — general terms and conditions
+                    2. Policy Schedule — specific details for this policy
 
-                Combine both into one answer.
+                    Combine both into one clear, concise answer.
+                    Do not repeat information.
+                    If both sources say the same thing, mention it once.
+                    If they provide different information, include both."""
+                },
+                {
+                    "role": "user",
+                    "content": f"""
+                    User Question: {question}
 
-                Format rules:
-                - If there is more than one distinct point, use short bullet points (start each with "- ")
-                - If it's a single fact, answer in one short sentence
-                - Do not repeat information — if both sources agree, state it once
-                - If they differ, show both as separate bullets
-                - No preamble, no repeating the question"""
-            },
-            {
-                "role": "user",
-                "content": f"""
-                User Question: {question}
+                    Answer from Policy Wording:
+                    {wording_answer}
 
-                Answer from Policy Wording:
-                {wording_answer}
+                    Answer from Policy Schedule:
+                    {schedule_answer}
 
-                Answer from Policy Schedule:
-                {schedule_answer}
+                    Please provide one combined clear answer.
+                    """
+                }
+            ]
+        )
 
-                Please provide one combined answer following the format rules.
-                """
-            }
-        ]
-    )
+        combined = response.choices[0].message.content
+        logger.info(f"[WORDING AND SCHEDULE] Combined answer: {combined[:200]}...")
+        state["final_answer"] = combined
 
-    state["final_answer"] = response.choices[0].message.content
+    except Exception as e:
+        logger.error(f"[WORDING AND SCHEDULE] Error combining answers: {e}")
+        state["final_answer"] = f"Wording: {wording_answer}\n\nSchedule: {schedule_answer}"
+
     return state
 
 def handle_blocked(state: AgentState) -> AgentState:
     """Return friendly message for non relevant questions"""
+    logger.info(f"[BLOCKED] Question blocked as non-relevant: {state['question']}")
     state["final_answer"] = (
         "I'm sorry, I can only assist with questions related to your "
         "ERGO insurance policies. This includes policy coverage, "
@@ -267,16 +279,13 @@ def build_graph():
     """Build LangGraph supervisor"""
     graph = StateGraph(AgentState)
 
-    # Add all nodes
     graph.add_node("classifier", classify_question)
     graph.add_node("wording_only", handle_wording_only)
     graph.add_node("wording_and_schedule", handle_wording_and_schedule)
     graph.add_node("blocked", handle_blocked)
 
-    # Set entry point
     graph.set_entry_point("classifier")
 
-    # Add conditional routing
     graph.add_conditional_edges(
         "classifier",
         route_question,
@@ -287,7 +296,6 @@ def build_graph():
         }
     )
 
-    # All nodes end the graph
     graph.add_edge("wording_only", END)
     graph.add_edge("wording_and_schedule", END)
     graph.add_edge("blocked", END)
@@ -298,6 +306,10 @@ supervisor_graph = build_graph()
 
 def run_supervisor(question: str) -> str:
     """Main entry point"""
+    logger.info(f"[SUPERVISOR] ════════════════════════════════")
+    logger.info(f"[SUPERVISOR] New question received: {question}")
+    logger.info(f"[SUPERVISOR] ════════════════════════════════")
+
     result = supervisor_graph.invoke({
         "question": question,
         "policy_no": None,
@@ -306,4 +318,6 @@ def run_supervisor(question: str) -> str:
         "is_relevant": None,
         "final_answer": None
     })
+
+    logger.info(f"[SUPERVISOR] Final answer: {result['final_answer'][:200]}...")
     return result["final_answer"]
