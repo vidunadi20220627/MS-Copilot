@@ -427,86 +427,86 @@ def handle_wording_only(state: AgentState) -> AgentState:
 
     return state
 
+def _schedule_answer_insufficient(answer: str) -> bool:
+    """Heuristic: does the schedule answer indicate it couldn't find
+    the information, meaning we should also check the wording?"""
+    lowered = answer.lower()
+    markers = [
+        "does not mention", "not specify", "not specified",
+        "does not specify", "could not find", "not stated",
+        "not clear from", "does not explicitly", "sorry, i could not",
+    ]
+    return any(m in lowered for m in markers)
+
+
 def handle_wording_and_schedule(state: AgentState) -> AgentState:
     """
-    Policy number found in question or history
-    Get BOTH wording and schedule for that specific policy
-    Answer in context of conversation history
+    Policy number found in question or history.
+    SCHEDULE-FIRST: try the schedule alone (fast path — no PDF search,
+    no embeddings, no extra GPT call). Only fall back to the wording
+    tool + a merge call when the schedule genuinely can't answer it.
     """
     policy_no = state["policy_no"]
     question = state["question"]
     history = state.get("conversation_history", [])
 
-    logger.info(f"[WORDING AND SCHEDULE] Policy: {policy_no}")
+    logger.info(f"[SCHEDULE FIRST] Policy: {policy_no}")
 
-    # Get wording answer
-    logger.info(f"[WORDING AND SCHEDULE] Fetching wording for {policy_no}")
+    schedule_answer = answer_from_schedule(question=question, policy_no=policy_no)
+    logger.info(f"[SCHEDULE FIRST] Schedule answer: {schedule_answer[:200]}...")
+
+    if not _schedule_answer_insufficient(schedule_answer):
+        # Schedule answered it directly — fast path, skip the PDF tool entirely
+        state["final_answer"] = schedule_answer
+        return state
+
+    logger.info("[SCHEDULE FIRST] Schedule insufficient — falling back to wording")
     wording_answer = answer_from_pdf(
         question=question,
         policy_no=policy_no,
         conversation_history=history
     )
-    logger.info(f"[WORDING AND SCHEDULE] Wording: {wording_answer[:200]}...")
+    logger.info(f"[SCHEDULE FIRST] Wording answer: {wording_answer[:200]}...")
 
-    # Get schedule answer
-    logger.info(f"[WORDING AND SCHEDULE] Fetching schedule for {policy_no}")
-    schedule_answer = answer_from_schedule(
-        question=question,
-        policy_no=policy_no
-    )
-    logger.info(f"[WORDING AND SCHEDULE] Schedule: {schedule_answer[:200]}...")
-
-    # Combine with history context
     try:
         messages = [
             {
                 "role": "system",
-                "content": f"""You are a helpful ERGO insurance assistant.
-                You are discussing policy {policy_no}.
-                Answer naturally and conversationally.
-                Take into account the full conversation history.
-                If user refers to something from earlier in conversation
-                use history to understand what they mean.
-                Combine wording and schedule information into
-                one clear concise answer without repetition."""
+                "content": f"""You are a helpful ERGO insurance assistant discussing policy {policy_no}.
+                You have two pieces of information about this policy: one from the
+                policy schedule (specific figures/dates for this policy) and one from
+                the general policy wording (terms/definitions/conditions).
+
+                Merge them into ONE natural, direct, conversational answer.
+                Do NOT label or mention which piece came from which source
+                (never write "Wording:" or "Schedule:" or similar — the user
+                must never see those words).
+                Do not repeat information — if both say the same thing, state it once.
+                Prioritize the schedule's specific figures over general wording
+                language when they overlap. Use the conversation history if the
+                user is referring to something discussed earlier."""
             }
         ]
-
-        # Add history
         messages.extend(build_history_for_gpt(history))
-
-        # Add current context
         messages.append({
             "role": "user",
             "content": f"""
             Question: {question}
 
-            From Policy Wording:
-            {wording_answer}
+            Source 1 (schedule): {schedule_answer}
 
-            From Policy Schedule ({policy_no}):
-            {schedule_answer}
+            Source 2 (wording): {wording_answer}
 
-            Provide one natural combined answer using
-            conversation history for context.
+            Give one combined, natural answer with no source labels.
             """
         })
 
-        response = client.chat.completions.create(
-            model="gpt-4o",
-            messages=messages
-        )
-
-        final_answer = response.choices[0].message.content
-        logger.info(f"[WORDING AND SCHEDULE] Final: {final_answer[:200]}...")
-        state["final_answer"] = final_answer
+        response = client.chat.completions.create(model="gpt-4o", messages=messages)
+        state["final_answer"] = response.choices[0].message.content
 
     except Exception as e:
-        logger.error(f"[WORDING AND SCHEDULE] Error combining: {e}")
-        state["final_answer"] = (
-            f"From policy wording:\n{wording_answer}\n\n"
-            f"From policy schedule:\n{schedule_answer}"
-        )
+        logger.error(f"[SCHEDULE FIRST] Error combining answers: {e}")
+        state["final_answer"] = schedule_answer  # fall back to schedule alone
 
     return state
 
