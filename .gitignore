@@ -224,3 +224,5 @@ echo ".DS_Store" >> .gitignore
 echo "postgres_data/" >> .gitignore
 
 vector_store/chroma_data/
+
+logs/
