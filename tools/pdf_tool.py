@@ -116,6 +116,22 @@ def get_embedding(text: str) -> list:
     )
     return response.data[0].embedding
 
+
+def get_embeddings_batch(texts: list, batch_size: int = 100) -> list:
+    """Embed many chunks in as few API calls as possible."""
+    all_embeddings = []
+    for i in range(0, len(texts), batch_size):
+        batch = texts[i:i + batch_size]
+        response = client.embeddings.create(
+            input=batch,
+            model="text-embedding-3-small"
+        )
+        all_embeddings.extend([d.embedding for d in response.data])
+        logger.info(f"[INDEX PDF] Embedded {min(i + batch_size, len(texts))}/{len(texts)} chunks")
+    return all_embeddings
+
+
+
 def index_pdf(policy_no: str, access_token: str) -> bool:
     """Fetch PDF, extract text, chunk, embed and store in ChromaDB"""
     logger.info(f"[INDEX PDF] Starting indexing for policy: {policy_no}")
@@ -142,15 +158,14 @@ def index_pdf(policy_no: str, access_token: str) -> bool:
     collection = get_or_create_collection(collection_name)
     logger.info(f"[INDEX PDF] Embedding {len(chunks)} chunks...")
 
-    for i, chunk in enumerate(chunks):
-        embedding = get_embedding(chunk)
-        collection.add(
-            documents=[chunk],
-            embeddings=[embedding],
-            ids=[f"chunk_{i}"]
-        )
-        if (i + 1) % 10 == 0:
-            logger.info(f"[INDEX PDF] Progress: {i + 1}/{len(chunks)}")
+    embeddings = get_embeddings_batch(chunks)
+
+    # single add() call, flat lists — not one add() per chunk
+    collection.add(
+        documents=chunks,
+        embeddings=embeddings,
+        ids=[f"chunk_{i}" for i in range(len(chunks))]
+    )
 
     indexed_tokens[policy_no] = access_token
     logger.info(f"[INDEX PDF] Indexing complete - {len(chunks)} chunks stored")
@@ -338,6 +353,7 @@ def answer_from_pdf(
         logger.info(f"[PDF TOOL] Re-indexing PDF for: {policy_no}")
         success = index_pdf(policy_no, access_token)
         if not success:
+            logger.error(f"[PDF TOOL] Failed to index PDF for policy: {policy_no}")
             return "Sorry, I could not retrieve the policy wording document."
     else:
         logger.info(f"[PDF TOOL] Using cached index for: {policy_no}")
