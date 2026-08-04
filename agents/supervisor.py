@@ -28,7 +28,7 @@ client = OpenAI(api_key=OPENAI_API_KEY)
 VALID_PRODUCT_CODES = [
     "DTPS",
     "DPAI",
-    # TODO: add more product codes here
+    #add more product codes here
 ]
 
 # ── Followup indicators ───────────────────────────────────────────────
@@ -129,7 +129,7 @@ def classify_question(state: AgentState) -> AgentState:
     question = state["question"]
     history = state.get("conversation_history", [])
 
-    logger.info(f"[CLASSIFIER] ========================")
+    logger.info("[CLASSIFIER] ========================")
     logger.info(f"[CLASSIFIER] Question: {question}")
     logger.info(f"[CLASSIFIER] History length: {len(history)} messages")
 
@@ -270,8 +270,8 @@ def classify_question(state: AgentState) -> AgentState:
         state["is_relevant"] = result.get("is_relevant", False)
         logger.info(f"[CLASSIFIER] GPT result: {result}")
 
-    except Exception as e:
-        logger.error(f"[CLASSIFIER] GPT error: {e}")
+    except Exception:
+        logger.exception("[CLASSIFIER] GPT error")
         state["is_relevant"] = True
 
     if state["is_relevant"]:
@@ -378,8 +378,8 @@ def handle_wording_only(state: AgentState) -> AgentState:
         logger.info(f"[WORDING ONLY] Final answer: {final_answer[:200]}...")
         state["final_answer"] = final_answer
 
-    except Exception as e:
-        logger.error(f"[WORDING ONLY] Error: {e}")
+    except Exception:
+        logger.exception("[WORDING ONLY] Error")
         state["final_answer"] = raw_answer
 
     return state
@@ -479,8 +479,8 @@ def handle_wording_and_schedule(state: AgentState) -> AgentState:
         response = client.chat.completions.create(model="gpt-4o", messages=messages)
         state["final_answer"] = response.choices[0].message.content
 
-    except Exception as e:
-        logger.error(f"[SCHEDULE FIRST] Error combining answers: {e}")
+    except Exception:
+        logger.exception("[SCHEDULE FIRST] Error combining answers")
         state["final_answer"] = schedule_answer
 
     return state
@@ -540,11 +540,11 @@ def run_supervisor(
     if conversation_history is None:
         conversation_history = []
 
-    logger.info(f"[SUPERVISOR] ================================")
+    logger.info("[SUPERVISOR] ================================")
     logger.info(f"[SUPERVISOR] Question: {question}")
     logger.info(f"[SUPERVISOR] History: {len(conversation_history)} messages")
     logger.info(f"[SUPERVISOR] Debug mode: {debug_mode}")
-    logger.info(f"[SUPERVISOR] ================================")
+    logger.info("[SUPERVISOR] ================================")
 
     result = supervisor_graph.invoke({
         "question": question,

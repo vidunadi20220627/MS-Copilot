@@ -48,13 +48,13 @@ def fetch_schedule_base64(policy_no: str, access_token: str) -> Optional[str]:
         return doc
 
     except requests.exceptions.Timeout:
-        logger.error("[FETCH SCHEDULE] API request timed out after 30 seconds")
+        logger.exception("[FETCH SCHEDULE] API request timed out after 30 seconds")
         return None
-    except requests.exceptions.HTTPError as e:
-        logger.error(f"[FETCH SCHEDULE] HTTP error: {e}")
+    except requests.exceptions.HTTPError:
+        logger.exception("[FETCH SCHEDULE] HTTP error")
         return None
-    except Exception as e:
-        logger.error(f"[FETCH SCHEDULE] Unexpected error: {e}")
+    except Exception:
+        logger.exception("[FETCH SCHEDULE] Unexpected error")
         return None
 
 def decode_base64_to_text(base64_string: str) -> Optional[str]:
@@ -82,8 +82,8 @@ def decode_base64_to_text(base64_string: str) -> Optional[str]:
 
         return full_text
 
-    except Exception as e:
-        logger.error(f"[DECODE SCHEDULE] Error: {e}")
+    except Exception:
+        logger.exception("[DECODE SCHEDULE] Error")
         return None
 
 def answer_from_schedule(question: str, policy_no: str) -> str:
@@ -156,6 +156,6 @@ def answer_from_schedule_with_details(
         logger.info(f"[SCHEDULE TOOL] Answer: {answer[:200]}...")
         return answer, schedule_text
 
-    except Exception as e:
-        logger.error(f"[SCHEDULE TOOL] GPT error: {e}")
+    except Exception:
+        logger.exception("[SCHEDULE TOOL] GPT error")
         return "Sorry, I encountered an error generating the answer.", schedule_text

@@ -58,13 +58,13 @@ def fetch_pdf_base64(policy_no: str, access_token: str) -> Optional[str]:
         return doc
 
     except requests.exceptions.Timeout:
-        logger.error("[FETCH PDF] API request timed out after 30 seconds")
+        logger.exception("[FETCH PDF] API request timed out after 30 seconds")
         return None
-    except requests.exceptions.HTTPError as e:
-        logger.error(f"[FETCH PDF] HTTP error: {e}")
+    except requests.exceptions.HTTPError:
+        logger.exception("[FETCH PDF] HTTP error")
         return None
-    except Exception as e:
-        logger.error(f"[FETCH PDF] Unexpected error: {e}")
+    except Exception:
+        logger.exception("[FETCH PDF] Unexpected error")
         return None
 
 def decode_base64_to_text(base64_string: str) -> Optional[str]:
@@ -92,8 +92,8 @@ def decode_base64_to_text(base64_string: str) -> Optional[str]:
 
         return full_text
 
-    except Exception as e:
-        logger.error(f"[DECODE PDF] Error: {e}")
+    except Exception:
+        logger.exception("[DECODE PDF] Error")
         return None
 
 def chunk_text(text: str, chunk_size: int = 500, overlap: int = 50) -> list:
@@ -172,15 +172,15 @@ def should_reindex(policy_no: str, access_token: str) -> bool:
     collection_name = f"policy_wording_{policy_no}"
 
     if not collection_exists(collection_name):
-        logger.info(f"[REINDEX CHECK] Collection not found - reindex needed")
+        logger.info("[REINDEX CHECK] Collection not found - reindex needed")
         return True
 
     cached_token = indexed_tokens.get(policy_no)
     if cached_token != access_token:
-        logger.info(f"[REINDEX CHECK] Token changed - reindex needed")
+        logger.info("[REINDEX CHECK] Token changed - reindex needed")
         return True
 
-    logger.info(f"[REINDEX CHECK] Using existing cache - no reindex needed")
+    logger.info("[REINDEX CHECK] Using existing cache - no reindex needed")
     return False
 
 def resolve_question_with_history(
@@ -260,8 +260,8 @@ Rewrite this follow-up question to be specific:"""
         logger.info(f"[RESOLVE QUESTION] Resolved: '{resolved}'")
         return resolved
 
-    except Exception as e:
-        logger.error(f"[RESOLVE QUESTION] Error resolving question: {e}")
+    except Exception:
+        logger.exception("[RESOLVE QUESTION] Error resolving question")
         return question
 
 def search_pdf_with_details(
@@ -429,6 +429,6 @@ def answer_from_pdf_with_details(
         logger.info(f"[PDF TOOL] Answer: {answer[:200]}...")
         return answer, chunk_details, resolved_question
 
-    except Exception as e:
-        logger.error(f"[PDF TOOL] GPT error: {e}")
+    except Exception:
+        logger.exception("[PDF TOOL] GPT error")
         return "Sorry, I encountered an error generating the answer.", chunk_details, resolved_question
