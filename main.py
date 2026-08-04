@@ -2,7 +2,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from api_gateway.router import api_router
-from config.settings import APP_HOST, APP_PORT, DEBUG
+from config.settings import APP_HOST, APP_PORT
 from db.connection import test_connection
 from tools.vanna_tool import setup_vanna
 import logging
@@ -49,5 +49,5 @@ if __name__ == "__main__":
         "main:app",
         host=APP_HOST,
         port=APP_PORT,
-        reload=False        # ← turn off reload to fix cache reset issue
+        reload=False
     )

@@ -1,7 +1,7 @@
 from langgraph.graph import StateGraph, END
 from agents.state import AgentState
-from tools.pdf_tool import answer_from_pdf
-from tools.policy_schedule_tool import answer_from_schedule
+from tools.pdf_tool import answer_from_pdf, answer_from_pdf_with_details
+from tools.policy_schedule_tool import answer_from_schedule, answer_from_schedule_with_details
 from openai import OpenAI
 from config.settings import OPENAI_API_KEY
 import json
@@ -10,28 +10,28 @@ import logging
 from typing import Optional, List
 
 # ── Logging Setup ────────────────────────────────────────────────────
+import os
+os.makedirs("logs", exist_ok=True)
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
     handlers=[
         logging.StreamHandler(),
-        logging.FileHandler("logs/supervisor.log")
+        logging.FileHandler("logs/supervisor.log", encoding="utf-8")
     ]
 )
 logger = logging.getLogger("supervisor")
 
 client = OpenAI(api_key=OPENAI_API_KEY)
 
-# ── Product code prefixes for policy number validation ───────────────
-# TODO: Add all product codes here when received
+# ── Product code prefixes ─────────────────────────────────────────────
 VALID_PRODUCT_CODES = [
-    "DTPS",   # Travel Per Trip
-    "DPAI",   # Personal Accident
+    "DTPS",
+    "DPAI",
     # TODO: add more product codes here
 ]
 
 # ── Followup indicators ───────────────────────────────────────────────
-# Pronouns and vague references that indicate followup questions
 FOLLOWUP_INDICATORS = [
     "that", "it", "this", "those", "these",
     "same", "above", "mentioned", "said",
@@ -50,10 +50,6 @@ FOLLOWUP_INDICATORS = [
 # ── Helper Functions ──────────────────────────────────────────────────
 
 def extract_policy_no_from_text(text: str) -> Optional[str]:
-    """
-    Extract policy number from any text string
-    Validates using product code prefixes
-    """
     text_upper = text.upper()
     for code in VALID_PRODUCT_CODES:
         pattern = rf'\b({code}[A-Z0-9]{{6,}})\b'
@@ -66,22 +62,13 @@ def extract_policy_no_from_history(
     current_question: str,
     history: List[dict]
 ) -> Optional[str]:
-    """
-    Try to find policy number from:
-    1. Current question first
-    2. If not found look through conversation history
-    Allows user to mention policy once and not
-    repeat it in every subsequent message
-    """
-    # Check current question first
     policy_no = extract_policy_no_from_text(current_question)
     if policy_no:
         logger.info(f"[POLICY EXTRACT] Found in current question: {policy_no}")
         return policy_no
 
-    # Not in current question — search history
     logger.info("[POLICY EXTRACT] Not in current question — searching history...")
-    for message in reversed(history):  # most recent first
+    for message in reversed(history):
         policy_no = extract_policy_no_from_text(message.get("content", ""))
         if policy_no:
             logger.info(f"[POLICY EXTRACT] Found in history: {policy_no}")
@@ -91,10 +78,6 @@ def extract_policy_no_from_history(
     return None
 
 def build_history_for_gpt(history: List[dict]) -> List[dict]:
-    """
-    Format conversation history for GPT API
-    Only send last 10 messages to avoid token limit
-    """
     recent_history = history[-10:] if len(history) > 10 else history
     return [
         {"role": msg["role"], "content": msg["content"]}
@@ -102,42 +85,24 @@ def build_history_for_gpt(history: List[dict]) -> List[dict]:
     ]
 
 def is_followup_question(question: str) -> bool:
-    """
-    Check if question is a short followup using
-    pronouns or vague references
-    These need history context to classify properly
-    """
     question_lower = question.lower().strip()
 
-    # Very short questions are likely followups
     word_count = len(question_lower.split())
     if word_count <= 4:
-        logger.info(
-            f"[FOLLOWUP CHECK] Short question ({word_count} words) "
-            f"— likely a followup"
-        )
+        logger.info(f"[FOLLOWUP CHECK] Short question ({word_count} words) - likely a followup")
         return True
 
-    # Check for followup indicator words
     for indicator in FOLLOWUP_INDICATORS:
         if indicator in question_lower:
-            logger.info(
-                f"[FOLLOWUP CHECK] Found followup indicator: '{indicator}'"
-            )
+            logger.info(f"[FOLLOWUP CHECK] Found followup indicator: '{indicator}'")
             return True
 
     return False
 
 def has_insurance_context_in_history(history: List[dict]) -> bool:
-    """
-    Check if recent conversation history contains
-    insurance related context
-    If yes — current followup question is relevant
-    """
     if not history:
         return False
 
-    # Check last 6 messages (3 exchanges)
     recent = history[-6:]
 
     insurance_context_keywords = [
@@ -152,10 +117,7 @@ def has_insurance_context_in_history(history: List[dict]) -> bool:
         content = message.get("content", "").lower()
         for keyword in insurance_context_keywords:
             if keyword.lower() in content:
-                logger.info(
-                    f"[HISTORY CHECK] Insurance context found: "
-                    f"'{keyword}' in recent history"
-                )
+                logger.info(f"[HISTORY CHECK] Insurance context found: '{keyword}' in recent history")
                 return True
 
     logger.info("[HISTORY CHECK] No insurance context in recent history")
@@ -164,13 +126,6 @@ def has_insurance_context_in_history(history: List[dict]) -> bool:
 # ── Main Classification ───────────────────────────────────────────────
 
 def classify_question(state: AgentState) -> AgentState:
-    """
-    Step 1: Extract policy number from question OR history
-    Step 2: Check if question is a followup with pronouns
-            If yes and history has insurance context → relevant
-    Step 3: If not followup → classify with GPT using keywords
-    Step 4: Determine question type
-    """
     question = state["question"]
     history = state.get("conversation_history", [])
 
@@ -178,49 +133,52 @@ def classify_question(state: AgentState) -> AgentState:
     logger.info(f"[CLASSIFIER] Question: {question}")
     logger.info(f"[CLASSIFIER] History length: {len(history)} messages")
 
-    # ── Extract policy number ─────────────────────────────────────
     policy_no = extract_policy_no_from_history(question, history)
     state["policy_no"] = policy_no
     state["has_policy_no"] = policy_no is not None
     logger.info(f"[CLASSIFIER] Policy number: {policy_no}")
 
-    # ── Step 1: Check if followup question ───────────────────────
-    # Handle pronouns like "that", "it", "this"
-    # before sending to GPT classifier
+    was_followup = False
+
     if is_followup_question(question):
         logger.info("[CLASSIFIER] Detected followup question — checking history")
+        was_followup = True
 
         if has_insurance_context_in_history(history):
-            logger.info(
-                "[CLASSIFIER] Insurance context in history — "
-                "marking as relevant "
-            )
+            logger.info("[CLASSIFIER] Insurance context in history — marking as relevant")
             state["is_relevant"] = True
 
-            # Set question type based on policy number
             if state["has_policy_no"]:
                 state["question_type"] = "wording_and_schedule"
             else:
                 state["question_type"] = "wording_only"
 
-            logger.info(
-                f"[CLASSIFIER] Followup result — "
-                f"is_relevant=True | "
-                f"question_type={state['question_type']}"
-            )
+            # Store routing info for debug
+            state["routing_info"] = {
+                "policy_no_detected": policy_no,
+                "question_type": state["question_type"],
+                "is_relevant": True,
+                "was_followup": was_followup,
+                "classification_method": "followup_with_history"
+            }
+
+            logger.info(f"[CLASSIFIER] Followup result — is_relevant=True | question_type={state['question_type']}")
             return state
 
         else:
-            logger.info(
-                "[CLASSIFIER] No insurance context in history — "
-                "blocking followup question"
-            )
+            logger.info("[CLASSIFIER] No insurance context in history — blocking followup")
             state["is_relevant"] = False
             state["question_type"] = None
+
+            state["routing_info"] = {
+                "policy_no_detected": policy_no,
+                "question_type": None,
+                "is_relevant": False,
+                "was_followup": was_followup,
+                "classification_method": "followup_blocked_no_history"
+            }
             return state
 
-    # ── Step 2: Normal GPT classification ────────────────────────
-    # Not a followup — classify normally with keywords
     logger.info("[CLASSIFIER] Not a followup — running GPT classification")
 
     try:
@@ -299,14 +257,8 @@ def classify_question(state: AgentState) -> AgentState:
             }
         ]
 
-        # Add conversation history for context
         messages.extend(build_history_for_gpt(history))
-
-        # Add current question
-        messages.append({
-            "role": "user",
-            "content": question
-        })
+        messages.append({"role": "user", "content": question})
 
         response = client.chat.completions.create(
             model="gpt-4o",
@@ -320,11 +272,8 @@ def classify_question(state: AgentState) -> AgentState:
 
     except Exception as e:
         logger.error(f"[CLASSIFIER] GPT error: {e}")
-        # Default to relevant if classification fails
-        # Better to attempt answer than wrongly block
         state["is_relevant"] = True
 
-    # ── Set question type ─────────────────────────────────────────
     if state["is_relevant"]:
         if state["has_policy_no"]:
             state["question_type"] = "wording_and_schedule"
@@ -333,11 +282,17 @@ def classify_question(state: AgentState) -> AgentState:
     else:
         state["question_type"] = None
 
+    state["routing_info"] = {
+        "policy_no_detected": policy_no,
+        "question_type": state["question_type"],
+        "is_relevant": state["is_relevant"],
+        "was_followup": was_followup,
+        "classification_method": "gpt_classifier"
+    }
+
     logger.info(
-        f"[CLASSIFIER] Final — "
-        f"is_relevant={state['is_relevant']} | "
-        f"question_type={state['question_type']} | "
-        f"policy_no={state['policy_no']}"
+        f"[CLASSIFIER] Final — is_relevant={state['is_relevant']} | "
+        f"question_type={state['question_type']} | policy_no={state['policy_no']}"
     )
 
     return state
@@ -345,7 +300,6 @@ def classify_question(state: AgentState) -> AgentState:
 # ── Routing ───────────────────────────────────────────────────────────
 
 def route_question(state: AgentState) -> str:
-    """Route to correct handler based on classification"""
     route = "blocked"
 
     if not state["is_relevant"]:
@@ -361,26 +315,31 @@ def route_question(state: AgentState) -> str:
 # ── Handlers ──────────────────────────────────────────────────────────
 
 def handle_wording_only(state: AgentState) -> AgentState:
-    """
-    No policy number in question or history
-    Get LATEST policy wording from DB
-    Answer in context of conversation history
-    """
     logger.info("[WORDING ONLY] Handling wording only question")
     logger.info("[WORDING ONLY] No policy number — fetching latest wording from DB")
 
     history = state.get("conversation_history", [])
+    debug_mode = state.get("debug_mode", False)
 
-    # Get base answer from PDF tool
-    raw_answer = answer_from_pdf(
-        question=state["question"],
-        policy_no=None,
-        conversation_history=history
-    )
+    if debug_mode:
+        # Debug mode — use detailed version to capture chunks
+        raw_answer, chunk_details, resolved_q = answer_from_pdf_with_details(
+            question=state["question"],
+            policy_no=None,
+            conversation_history=history
+        )
+        state["wording_chunks"] = chunk_details
+        state["resolved_question"] = resolved_q
+        state["source_used"] = "wording"
+    else:
+        raw_answer = answer_from_pdf(
+            question=state["question"],
+            policy_no=None,
+            conversation_history=history
+        )
 
     logger.info(f"[WORDING ONLY] Raw answer: {raw_answer[:200]}...")
 
-    # Use GPT to make answer conversational with history context
     try:
         messages = [
             {
@@ -395,10 +354,8 @@ def handle_wording_only(state: AgentState) -> AgentState:
             }
         ]
 
-        # Add history
         messages.extend(build_history_for_gpt(history))
 
-        # Add current question with raw answer as context
         messages.append({
             "role": "user",
             "content": f"""
@@ -428,8 +385,7 @@ def handle_wording_only(state: AgentState) -> AgentState:
     return state
 
 def _schedule_answer_insufficient(answer: str) -> bool:
-    """Heuristic: does the schedule answer indicate it couldn't find
-    the information, meaning we should also check the wording?"""
+    """Check if schedule answer indicates it could not find the information"""
     lowered = answer.lower()
     markers = [
         "does not mention", "not specify", "not specified",
@@ -438,34 +394,54 @@ def _schedule_answer_insufficient(answer: str) -> bool:
     ]
     return any(m in lowered for m in markers)
 
-
 def handle_wording_and_schedule(state: AgentState) -> AgentState:
     """
-    Policy number found in question or history.
-    SCHEDULE-FIRST: try the schedule alone (fast path — no PDF search,
-    no embeddings, no extra GPT call). Only fall back to the wording
-    tool + a merge call when the schedule genuinely can't answer it.
+    SCHEDULE-FIRST approach
+    Try schedule alone first, only fall back to wording if insufficient
     """
     policy_no = state["policy_no"]
     question = state["question"]
     history = state.get("conversation_history", [])
+    debug_mode = state.get("debug_mode", False)
 
     logger.info(f"[SCHEDULE FIRST] Policy: {policy_no}")
 
-    schedule_answer = answer_from_schedule(question=question, policy_no=policy_no)
+    if debug_mode:
+        schedule_answer, schedule_text = answer_from_schedule_with_details(
+            question=question,
+            policy_no=policy_no
+        )
+        state["schedule_text"] = schedule_text
+    else:
+        schedule_answer = answer_from_schedule(question=question, policy_no=policy_no)
+
     logger.info(f"[SCHEDULE FIRST] Schedule answer: {schedule_answer[:200]}...")
 
     if not _schedule_answer_insufficient(schedule_answer):
-        # Schedule answered it directly — fast path, skip the PDF tool entirely
+        # Schedule answered it — fast path
+        if debug_mode:
+            state["source_used"] = "schedule"
         state["final_answer"] = schedule_answer
         return state
 
     logger.info("[SCHEDULE FIRST] Schedule insufficient — falling back to wording")
-    wording_answer = answer_from_pdf(
-        question=question,
-        policy_no=policy_no,
-        conversation_history=history
-    )
+
+    if debug_mode:
+        wording_answer, chunk_details, resolved_q = answer_from_pdf_with_details(
+            question=question,
+            policy_no=policy_no,
+            conversation_history=history
+        )
+        state["wording_chunks"] = chunk_details
+        state["resolved_question"] = resolved_q
+        state["source_used"] = "wording_and_schedule"
+    else:
+        wording_answer = answer_from_pdf(
+            question=question,
+            policy_no=policy_no,
+            conversation_history=history
+        )
+
     logger.info(f"[SCHEDULE FIRST] Wording answer: {wording_answer[:200]}...")
 
     try:
@@ -479,9 +455,8 @@ def handle_wording_and_schedule(state: AgentState) -> AgentState:
 
                 Merge them into ONE natural, direct, conversational answer.
                 Do NOT label or mention which piece came from which source
-                (never write "Wording:" or "Schedule:" or similar — the user
-                must never see those words).
-                Do not repeat information — if both say the same thing, state it once.
+                (never write "Wording:" or "Schedule:" or similar).
+                Do not repeat information.
                 Prioritize the schedule's specific figures over general wording
                 language when they overlap. Use the conversation history if the
                 user is referring to something discussed earlier."""
@@ -506,13 +481,13 @@ def handle_wording_and_schedule(state: AgentState) -> AgentState:
 
     except Exception as e:
         logger.error(f"[SCHEDULE FIRST] Error combining answers: {e}")
-        state["final_answer"] = schedule_answer  # fall back to schedule alone
+        state["final_answer"] = schedule_answer
 
     return state
 
 def handle_blocked(state: AgentState) -> AgentState:
-    """Return friendly message for non relevant questions"""
     logger.info(f"[BLOCKED] Question blocked: {state['question']}")
+    state["source_used"] = "blocked"
     state["final_answer"] = (
         "I'm sorry, I can only assist with questions related to your "
         "ERGO insurance policies. This includes policy coverage, "
@@ -524,7 +499,6 @@ def handle_blocked(state: AgentState) -> AgentState:
 # ── Graph ─────────────────────────────────────────────────────────────
 
 def build_graph():
-    """Build LangGraph supervisor"""
     graph = StateGraph(AgentState)
 
     graph.add_node("classifier", classify_question)
@@ -552,12 +526,16 @@ def build_graph():
 
 supervisor_graph = build_graph()
 
-# ── Entry Point ───────────────────────────────────────────────────────
+# ── Entry Points ──────────────────────────────────────────────────────
 
-def run_supervisor(question: str, conversation_history: List[dict] = None) -> str:
+def run_supervisor(
+    question: str,
+    conversation_history: List[dict] = None,
+    debug_mode: bool = False
+) -> dict:
     """
     Main entry point
-    Accepts question and full conversation history
+    Returns dict with final_answer and optional debug info
     """
     if conversation_history is None:
         conversation_history = []
@@ -565,6 +543,7 @@ def run_supervisor(question: str, conversation_history: List[dict] = None) -> st
     logger.info(f"[SUPERVISOR] ================================")
     logger.info(f"[SUPERVISOR] Question: {question}")
     logger.info(f"[SUPERVISOR] History: {len(conversation_history)} messages")
+    logger.info(f"[SUPERVISOR] Debug mode: {debug_mode}")
     logger.info(f"[SUPERVISOR] ================================")
 
     result = supervisor_graph.invoke({
@@ -574,8 +553,15 @@ def run_supervisor(question: str, conversation_history: List[dict] = None) -> st
         "has_policy_no": None,
         "question_type": None,
         "is_relevant": None,
-        "final_answer": None
+        "final_answer": None,
+        "debug_mode": debug_mode,
+        "source_used": None,
+        "wording_chunks": None,
+        "schedule_text": None,
+        "resolved_question": None,
+        "routing_info": None
     })
 
     logger.info(f"[SUPERVISOR] Answer: {result['final_answer'][:200]}...")
-    return result["final_answer"]
+
+    return result
