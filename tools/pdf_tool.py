@@ -4,7 +4,7 @@ import PyPDF2
 import io
 import os
 import logging
-from typing import Optional, List
+from typing import Optional, List, Tuple
 from openai import OpenAI
 from vector_store.chroma import (
     get_or_create_collection,
@@ -116,7 +116,6 @@ def get_embedding(text: str) -> list:
     )
     return response.data[0].embedding
 
-
 def get_embeddings_batch(texts: list, batch_size: int = 100) -> list:
     """Embed many chunks in as few API calls as possible."""
     all_embeddings = []
@@ -129,8 +128,6 @@ def get_embeddings_batch(texts: list, batch_size: int = 100) -> list:
         all_embeddings.extend([d.embedding for d in response.data])
         logger.info(f"[INDEX PDF] Embedded {min(i + batch_size, len(texts))}/{len(texts)} chunks")
     return all_embeddings
-
-
 
 def index_pdf(policy_no: str, access_token: str) -> bool:
     """Fetch PDF, extract text, chunk, embed and store in ChromaDB"""
@@ -160,7 +157,6 @@ def index_pdf(policy_no: str, access_token: str) -> bool:
 
     embeddings = get_embeddings_batch(chunks)
 
-    # single add() call, flat lists — not one add() per chunk
     collection.add(
         documents=chunks,
         embeddings=embeddings,
@@ -192,16 +188,14 @@ def resolve_question_with_history(
     history: List[dict]
 ) -> str:
     """
-    KEY FIX: Rewrite vague questions using conversation history
+    Rewrite vague questions using conversation history
     Turns "tell me more about it" into a specific searchable question
-    Uses GPT to understand what "it" refers to from history
     """
     if not history:
         return question
 
     question_lower = question.lower().strip()
 
-    # Check if question is vague (contains pronouns or is short)
     vague_indicators = [
         "it", "that", "this", "those", "these",
         "tell me more", "explain", "elaborate",
@@ -212,14 +206,12 @@ def resolve_question_with_history(
     is_short = len(question.split()) <= 6
 
     if not (is_vague or is_short):
-        # Question is specific enough — no need to rewrite
         return question
 
     logger.info(f"[RESOLVE QUESTION] Vague question detected: '{question}'")
     logger.info(f"[RESOLVE QUESTION] Resolving using {len(history)} history messages")
 
     try:
-        # Build history context for GPT
         recent_history = history[-6:] if len(history) > 6 else history
         history_text = "\n".join([
             f"{msg['role'].upper()}: {msg['content']}"
@@ -272,12 +264,16 @@ Rewrite this follow-up question to be specific:"""
         logger.error(f"[RESOLVE QUESTION] Error resolving question: {e}")
         return question
 
-def search_pdf(
+def search_pdf_with_details(
     policy_no: str,
     question: str,
     top_k: int = 3
-) -> Optional[str]:
-    """Search ChromaDB for relevant chunks"""
+) -> Tuple[Optional[str], List[dict]]:
+    """
+    Search ChromaDB for relevant chunks
+    Returns both the combined text AND detailed chunk info
+    Used by both normal flow and debug endpoint
+    """
     collection_name = f"policy_wording_{policy_no}"
     logger.info(f"[SEARCH PDF] Searching: {collection_name}")
     logger.info(f"[SEARCH PDF] Question: {question}")
@@ -293,14 +289,35 @@ def search_pdf(
     if results and results["documents"] and results["documents"][0]:
         chunks = results["documents"][0]
         distances = results.get("distances", [[]])[0]
+
         logger.info(f"[SEARCH PDF] Found {len(chunks)} relevant chunks")
+
+        chunk_details = []
         for i, (chunk, dist) in enumerate(zip(chunks, distances)):
             logger.info(f"[SEARCH PDF] Chunk {i + 1} distance: {dist:.4f}")
             logger.info(f"[SEARCH PDF] Chunk {i + 1} preview: {chunk[:150]}...")
-        return "\n\n".join(chunks)
+            chunk_details.append({
+                "chunk_id": i + 1,
+                "content": chunk,
+                "similarity_distance": round(dist, 4)
+            })
+
+        return "\n\n".join(chunks), chunk_details
 
     logger.warning("[SEARCH PDF] No relevant chunks found")
-    return None
+    return None, []
+
+def search_pdf(
+    policy_no: str,
+    question: str,
+    top_k: int = 3
+) -> Optional[str]:
+    """
+    Original search function kept for backward compatibility
+    Just calls search_pdf_with_details and returns text only
+    """
+    text, _ = search_pdf_with_details(policy_no, question, top_k)
+    return text
 
 def answer_from_pdf(
     question: str,
@@ -308,13 +325,27 @@ def answer_from_pdf(
     conversation_history: Optional[List[dict]] = None
 ) -> str:
     """
-    Main function called by agent
+    Main function called by agent for normal chat flow
+    Returns answer string only
+    """
+    answer, _, _ = answer_from_pdf_with_details(
+        question=question,
+        policy_no=policy_no,
+        conversation_history=conversation_history
+    )
+    return answer
 
-    Two scenarios:
-    1. policy_no is None - get latest wording from DB
-    2. policy_no provided - get wording for that specific policy
-
-    Now also accepts conversation_history to resolve vague questions
+def answer_from_pdf_with_details(
+    question: str,
+    policy_no: Optional[str] = None,
+    conversation_history: Optional[List[dict]] = None
+) -> Tuple[str, List[dict], str]:
+    """
+    Extended version for debug endpoint
+    Returns:
+    - answer string
+    - list of chunk details (for debug)
+    - resolved question (for debug)
     """
     if conversation_history is None:
         conversation_history = []
@@ -323,7 +354,7 @@ def answer_from_pdf(
     logger.info(f"[PDF TOOL] Policy: {policy_no if policy_no else 'latest'}")
     logger.info(f"[PDF TOOL] History: {len(conversation_history)} messages")
 
-    # ── Step 1: Resolve vague question using history ──────────────
+    # ── Step 1: Resolve vague question ───────────────────────────
     resolved_question = resolve_question_with_history(
         question,
         conversation_history
@@ -334,7 +365,7 @@ def answer_from_pdf(
         credentials = get_latest_policy_wording_credentials()
         if not credentials:
             logger.error("[PDF TOOL] No active policy wording found in DB")
-            return "Sorry, I could not find any active policy wording in the system."
+            return "Sorry, I could not find any active policy wording in the system.", [], resolved_question
         policy_no = credentials["policy_no"]
         access_token = credentials["access_token"]
         logger.info(f"[PDF TOOL] Latest policy: {policy_no}")
@@ -343,7 +374,7 @@ def answer_from_pdf(
         credentials = get_policy_credentials_by_no(policy_no)
         if not credentials:
             logger.error(f"[PDF TOOL] Policy {policy_no} not found")
-            return f"Sorry, I could not find policy {policy_no} in the system."
+            return f"Sorry, I could not find policy {policy_no} in the system.", [], resolved_question
         access_token = credentials["access_token"]
 
     logger.info(f"[PDF TOOL] Token (first 8): {access_token[:8]}...")
@@ -353,18 +384,20 @@ def answer_from_pdf(
         logger.info(f"[PDF TOOL] Re-indexing PDF for: {policy_no}")
         success = index_pdf(policy_no, access_token)
         if not success:
-            logger.error(f"[PDF TOOL] Failed to index PDF for policy: {policy_no}")
-            return "Sorry, I could not retrieve the policy wording document."
+            return "Sorry, I could not retrieve the policy wording document.", [], resolved_question
     else:
         logger.info(f"[PDF TOOL] Using cached index for: {policy_no}")
 
-    # ── Step 3: Search using RESOLVED question ────────────────────
-    logger.info(f"[PDF TOOL] Searching with resolved question: {resolved_question}")
-    relevant_chunks = search_pdf(policy_no, resolved_question)
+    # ── Step 3: Search using resolved question ────────────────────
+    logger.info(f"[PDF TOOL] Searching with: {resolved_question}")
+    relevant_chunks_text, chunk_details = search_pdf_with_details(
+        policy_no,
+        resolved_question
+    )
 
-    if not relevant_chunks:
+    if not relevant_chunks_text:
         logger.warning("[PDF TOOL] No relevant chunks found")
-        return "Sorry, I could not find relevant information in the policy wording."
+        return "Sorry, I could not find relevant information in the policy wording.", [], resolved_question
 
     logger.info("[PDF TOOL] Sending to GPT for answer generation")
 
@@ -384,7 +417,7 @@ def answer_from_pdf(
                     "role": "user",
                     "content": f"""
                     Context from policy wording:
-                    {relevant_chunks}
+                    {relevant_chunks_text}
 
                     Question: {resolved_question}
                     """
@@ -394,8 +427,8 @@ def answer_from_pdf(
 
         answer = response.choices[0].message.content
         logger.info(f"[PDF TOOL] Answer: {answer[:200]}...")
-        return answer
+        return answer, chunk_details, resolved_question
 
     except Exception as e:
         logger.error(f"[PDF TOOL] GPT error: {e}")
-        return "Sorry, I encountered an error generating the answer."
+        return "Sorry, I encountered an error generating the answer.", chunk_details, resolved_question

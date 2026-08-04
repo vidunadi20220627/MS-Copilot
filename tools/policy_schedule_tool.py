@@ -3,7 +3,8 @@ import base64
 import PyPDF2
 import io
 import logging
-from typing import Optional
+import os
+from typing import Optional, Tuple
 from openai import OpenAI
 from config.settings import (
     POLICY_DOCUMENT_API_URL,
@@ -12,12 +13,13 @@ from config.settings import (
 from db.connection import get_policy_credentials_by_no
 
 # ── Logging Setup ────────────────────────────────────────────────────
+os.makedirs("logs", exist_ok=True)
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
     handlers=[
         logging.StreamHandler(),
-        logging.FileHandler("logs/schedule_tool.log")
+        logging.FileHandler("logs/schedule_tool.log", encoding="utf-8")
     ]
 )
 logger = logging.getLogger("schedule_tool")
@@ -38,9 +40,9 @@ def fetch_schedule_base64(policy_no: str, access_token: str) -> Optional[str]:
         doc = data.get("document")
 
         if doc:
-            logger.info(f"[FETCH SCHEDULE] Base64 document received — length: {len(doc)} chars")
+            logger.info(f"[FETCH SCHEDULE] Base64 document received - length: {len(doc)} chars")
         else:
-            logger.warning("[FETCH SCHEDULE] API returned response but no 'document' field found")
+            logger.warning("[FETCH SCHEDULE] No 'document' field found")
             logger.warning(f"[FETCH SCHEDULE] Response keys: {list(data.keys())}")
 
         return doc
@@ -49,7 +51,7 @@ def fetch_schedule_base64(policy_no: str, access_token: str) -> Optional[str]:
         logger.error("[FETCH SCHEDULE] API request timed out after 30 seconds")
         return None
     except requests.exceptions.HTTPError as e:
-        logger.error(f"[FETCH SCHEDULE] HTTP error: {e} | Status: {response.status_code}")
+        logger.error(f"[FETCH SCHEDULE] HTTP error: {e}")
         return None
     except Exception as e:
         logger.error(f"[FETCH SCHEDULE] Unexpected error: {e}")
@@ -65,61 +67,68 @@ def decode_base64_to_text(base64_string: str) -> Optional[str]:
 
         pdf_reader = PyPDF2.PdfReader(io.BytesIO(pdf_bytes))
         total_pages = len(pdf_reader.pages)
-        logger.info(f"[DECODE SCHEDULE] Total pages in PDF: {total_pages}")
+        logger.info(f"[DECODE SCHEDULE] Total pages: {total_pages}")
 
         full_text = ""
         for i, page in enumerate(pdf_reader.pages):
             page_text = page.extract_text()
             full_text += page_text + "\n"
-            logger.info(f"[DECODE SCHEDULE] Page {i + 1}/{total_pages} — {len(page_text)} chars")
+            logger.info(f"[DECODE SCHEDULE] Page {i + 1}/{total_pages} - {len(page_text)} chars")
 
-        logger.info(f"[DECODE SCHEDULE] Total text extracted: {len(full_text)} chars")
+        logger.info(f"[DECODE SCHEDULE] Total text: {len(full_text)} chars")
 
         if len(full_text.strip()) == 0:
-            logger.warning("[DECODE SCHEDULE] Extracted text is empty — PDF may be image based")
+            logger.warning("[DECODE SCHEDULE] Extracted text is empty")
 
         return full_text
 
     except Exception as e:
-        logger.error(f"[DECODE SCHEDULE] Error decoding PDF: {e}")
+        logger.error(f"[DECODE SCHEDULE] Error: {e}")
         return None
 
 def answer_from_schedule(question: str, policy_no: str) -> str:
     """
-    Main function called by agent
-    Only called when user provides a policy number
+    Main function called by agent for normal chat flow
+    Returns answer string only
     """
-    logger.info(f"[SCHEDULE TOOL] answer_from_schedule called")
+    answer, _ = answer_from_schedule_with_details(question, policy_no)
+    return answer
+
+def answer_from_schedule_with_details(
+    question: str,
+    policy_no: str
+) -> Tuple[str, Optional[str]]:
+    """
+    Extended version for debug endpoint
+    Returns:
+    - answer string
+    - full schedule text retrieved (for debug)
+    """
     logger.info(f"[SCHEDULE TOOL] Question: {question}")
     logger.info(f"[SCHEDULE TOOL] Policy no: {policy_no}")
 
-    # Get credentials for specific policy
-    logger.info(f"[SCHEDULE TOOL] Fetching credentials from DB for policy: {policy_no}")
     credentials = get_policy_credentials_by_no(policy_no)
 
     if not credentials:
-        logger.error(f"[SCHEDULE TOOL] Policy {policy_no} not found in DB view")
-        return f"Sorry, I could not find policy {policy_no} in the system. Please check the policy number and try again."
+        logger.error(f"[SCHEDULE TOOL] Policy {policy_no} not found")
+        msg = f"Sorry, I could not find policy {policy_no} in the system."
+        return msg, None
 
     access_token = credentials["access_token"]
-    logger.info(f"[SCHEDULE TOOL] Credentials found — token (first 8): {access_token[:8]}...")
+    logger.info(f"[SCHEDULE TOOL] Token (first 8): {access_token[:8]}...")
 
-    # Fetch schedule
     base64_string = fetch_schedule_base64(policy_no, access_token)
     if not base64_string:
-        logger.error(f"[SCHEDULE TOOL] Failed to fetch schedule for policy: {policy_no}")
-        return f"Sorry, I could not retrieve the policy schedule for {policy_no}."
+        logger.error(f"[SCHEDULE TOOL] Failed to fetch schedule for: {policy_no}")
+        return f"Sorry, I could not retrieve the policy schedule for {policy_no}.", None
 
-    # Decode to text
     schedule_text = decode_base64_to_text(base64_string)
     if not schedule_text:
         logger.error("[SCHEDULE TOOL] Failed to decode schedule PDF")
-        return "Sorry, I could not read the policy schedule."
+        return "Sorry, I could not read the policy schedule.", None
 
-    logger.info(f"[SCHEDULE TOOL] Schedule text ready — {len(schedule_text)} chars")
-    logger.info("[SCHEDULE TOOL] Sending schedule to GPT for answer generation")
+    logger.info(f"[SCHEDULE TOOL] Schedule text ready - {len(schedule_text)} chars")
 
-    # Generate answer
     try:
         response = client.chat.completions.create(
             model="gpt-4o",
@@ -144,9 +153,9 @@ def answer_from_schedule(question: str, policy_no: str) -> str:
         )
 
         answer = response.choices[0].message.content
-        logger.info(f"[SCHEDULE TOOL] GPT answer: {answer[:200]}...")
-        return answer
+        logger.info(f"[SCHEDULE TOOL] Answer: {answer[:200]}...")
+        return answer, schedule_text
 
     except Exception as e:
         logger.error(f"[SCHEDULE TOOL] GPT error: {e}")
-        return "Sorry, I encountered an error generating the answer."
+        return "Sorry, I encountered an error generating the answer.", schedule_text

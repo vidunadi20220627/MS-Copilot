@@ -23,11 +23,7 @@ class ChatResponse(BaseModel):
 
 @router.post("/chat", response_model=ChatResponse)
 async def chat(request: ChatRequest):
-    """
-    Main chat endpoint
-    Accepts question + full conversation history
-    Returns answer
-    """
+    """Main chat endpoint — used by frontend UI"""
     if not request.question or request.question.strip() == "":
         return JSONResponse(
             status_code=200,
@@ -38,7 +34,6 @@ async def chat(request: ChatRequest):
         )
 
     try:
-        # Convert history to list of dicts
         history = [
             {"role": msg.role, "content": msg.content}
             for msg in request.conversation_history
@@ -47,15 +42,16 @@ async def chat(request: ChatRequest):
         logger.info(f"[CHAT ROUTE] Question: {request.question}")
         logger.info(f"[CHAT ROUTE] History length: {len(history)}")
 
-        # Pass both question and history to supervisor
-        answer = run_supervisor(
+        # Normal chat — debug_mode=False
+        result = run_supervisor(
             question=request.question,
-            conversation_history=history
+            conversation_history=history,
+            debug_mode=False
         )
 
         return ChatResponse(
             question=request.question,
-            answer=answer
+            answer=result["final_answer"]
         )
 
     except Exception as e:
