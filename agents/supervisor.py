@@ -7,7 +7,7 @@ from config.settings import OPENAI_API_KEY
 import json
 import re
 import logging
-from typing import Optional, List
+from typing import Optional, List, Any
 
 # ── Logging Setup ────────────────────────────────────────────────────
 logging.basicConfig(
@@ -174,9 +174,9 @@ def classify_question(state: AgentState) -> AgentState:
     question = state["question"]
     history = state.get("conversation_history", [])
 
-    logger.info(f"[CLASSIFIER] ========================")
-    logger.info(f"[CLASSIFIER] Question: {question}")
-    logger.info(f"[CLASSIFIER] History length: {len(history)} messages")
+    logger.info("[CLASSIFIER] ========================")
+    logger.info("[CLASSIFIER] Question: %s", question)
+    logger.info("[CLASSIFIER] History length: %s messages", len(history))
 
     # ── Extract policy number ─────────────────────────────────────
     policy_no = extract_policy_no_from_history(question, history)
@@ -204,10 +204,13 @@ def classify_question(state: AgentState) -> AgentState:
                 state["question_type"] = "wording_only"
 
             logger.info(
-                f"[CLASSIFIER] Followup result — "
-                f"is_relevant=True | "
-                f"question_type={state['question_type']}"
+                "[CLASSIFIER] Followup result — is_relevant=True | question_type=%s",
+                state['question_type']
             )
+            state["routing_info"] = {
+                "route": state['question_type'],
+                "reason": "insurance context in history"
+            }
             return state
 
         else:
@@ -217,6 +220,7 @@ def classify_question(state: AgentState) -> AgentState:
             )
             state["is_relevant"] = False
             state["question_type"] = None
+            state["routing_info"] = {"route": "blocked", "reason": "no insurance context in history"}
             return state
 
     # ── Step 2: Normal GPT classification ────────────────────────
@@ -334,11 +338,17 @@ def classify_question(state: AgentState) -> AgentState:
         state["question_type"] = None
 
     logger.info(
-        f"[CLASSIFIER] Final — "
-        f"is_relevant={state['is_relevant']} | "
-        f"question_type={state['question_type']} | "
-        f"policy_no={state['policy_no']}"
+        "[CLASSIFIER] Final — %s | %s | %s",
+        state['is_relevant'],
+        state['question_type'],
+        state['policy_no']
     )
+
+    state["routing_info"] = {
+        "route": route_question(state),
+        "reason": "policy number found" if state.get("has_policy_no") else "no policy number"
+        if state.get("is_relevant") else "question blocked"
+    }
 
     return state
 
@@ -355,7 +365,7 @@ def route_question(state: AgentState) -> str:
     elif state["question_type"] == "wording_only":
         route = "wording_only"
 
-    logger.info(f"[ROUTER] Routing to: {route}")
+    logger.info("[ROUTER] Routing to: %s", route)
     return route
 
 # ── Handlers ──────────────────────────────────────────────────────────
@@ -372,13 +382,23 @@ def handle_wording_only(state: AgentState) -> AgentState:
     history = state.get("conversation_history", [])
 
     # Get base answer from PDF tool
-    raw_answer = answer_from_pdf(
+    debug_mode = state.get("debug_mode", False)
+    pdf_result = answer_from_pdf(
         question=state["question"],
         policy_no=None,
-        conversation_history=history
+        conversation_history=history,
+        return_metadata=debug_mode
     )
+    if debug_mode and isinstance(pdf_result, dict):
+        raw_answer = pdf_result.get("answer", "")
+        state["resolved_question"] = pdf_result.get("resolved_question")
+        state["wording_chunks"] = pdf_result.get("wording_chunks", [])
+    else:
+        raw_answer = pdf_result if isinstance(pdf_result, str) else ""
+        state["resolved_question"] = None
+        state["wording_chunks"] = []
 
-    logger.info(f"[WORDING ONLY] Raw answer: {raw_answer[:200]}...")
+    logger.info("[WORDING ONLY] Raw answer: %s...", raw_answer[:200])
 
     # Use GPT to make answer conversational with history context
     try:
@@ -418,12 +438,16 @@ def handle_wording_only(state: AgentState) -> AgentState:
         )
 
         final_answer = response.choices[0].message.content
-        logger.info(f"[WORDING ONLY] Final answer: {final_answer[:200]}...")
+        logger.info("[WORDING ONLY] Final answer: %s...", final_answer[:200])
         state["final_answer"] = final_answer
 
-    except Exception as e:
-        logger.error(f"[WORDING ONLY] Error: {e}")
+    except Exception:
+        logger.exception("[WORDING ONLY] Error")
         state["final_answer"] = raw_answer
+
+    state["source_used"] = "wording_only"
+    state["routing_info"] = state.get("routing_info") or {"route": "wording_only", "reason": "no policy number"}
+    state["schedule_text"] = None
 
     return state
 
@@ -437,24 +461,41 @@ def handle_wording_and_schedule(state: AgentState) -> AgentState:
     question = state["question"]
     history = state.get("conversation_history", [])
 
-    logger.info(f"[WORDING AND SCHEDULE] Policy: {policy_no}")
+    logger.info("[WORDING AND SCHEDULE] Policy: %s", policy_no)
+    debug_mode = state.get("debug_mode", False)
 
     # Get wording answer
-    logger.info(f"[WORDING AND SCHEDULE] Fetching wording for {policy_no}")
-    wording_answer = answer_from_pdf(
+    logger.info("[WORDING AND SCHEDULE] Fetching wording for %s", policy_no)
+    wording_result = answer_from_pdf(
         question=question,
         policy_no=policy_no,
-        conversation_history=history
+        conversation_history=history,
+        return_metadata=debug_mode
     )
-    logger.info(f"[WORDING AND SCHEDULE] Wording: {wording_answer[:200]}...")
+    if debug_mode and isinstance(wording_result, dict):
+        wording_answer = wording_result.get("answer", "")
+        state["resolved_question"] = wording_result.get("resolved_question")
+        state["wording_chunks"] = wording_result.get("wording_chunks", [])
+    else:
+        wording_answer = wording_result if isinstance(wording_result, str) else ""
+        state["resolved_question"] = None
+        state["wording_chunks"] = []
+    logger.info("[WORDING AND SCHEDULE] Wording: %s...", wording_answer[:200])
 
     # Get schedule answer
-    logger.info(f"[WORDING AND SCHEDULE] Fetching schedule for {policy_no}")
-    schedule_answer = answer_from_schedule(
+    logger.info("[WORDING AND SCHEDULE] Fetching schedule for %s", policy_no)
+    schedule_result = answer_from_schedule(
         question=question,
-        policy_no=policy_no
+        policy_no=policy_no,
+        return_metadata=debug_mode
     )
-    logger.info(f"[WORDING AND SCHEDULE] Schedule: {schedule_answer[:200]}...")
+    if debug_mode and isinstance(schedule_result, dict):
+        schedule_answer = schedule_result.get("answer", "")
+        state["schedule_text"] = schedule_result.get("schedule_text")
+    else:
+        schedule_answer = schedule_result if isinstance(schedule_result, str) else ""
+        state["schedule_text"] = None
+    logger.info("[WORDING AND SCHEDULE] Schedule: %s...", schedule_answer[:200])
 
     # Combine with history context
     try:
@@ -498,27 +539,35 @@ def handle_wording_and_schedule(state: AgentState) -> AgentState:
         )
 
         final_answer = response.choices[0].message.content
-        logger.info(f"[WORDING AND SCHEDULE] Final: {final_answer[:200]}...")
+        logger.info("[WORDING AND SCHEDULE] Final: %s...", final_answer[:200])
         state["final_answer"] = final_answer
 
-    except Exception as e:
-        logger.error(f"[WORDING AND SCHEDULE] Error combining: {e}")
+    except Exception:
+        logger.exception("[WORDING AND SCHEDULE] Error combining")
         state["final_answer"] = (
             f"From policy wording:\n{wording_answer}\n\n"
             f"From policy schedule:\n{schedule_answer}"
         )
 
+    state["source_used"] = "wording_and_schedule"
+    state["routing_info"] = state.get("routing_info") or {"route": "wording_and_schedule", "reason": "policy number found"}
+
     return state
 
 def handle_blocked(state: AgentState) -> AgentState:
     """Return friendly message for non relevant questions"""
-    logger.info(f"[BLOCKED] Question blocked: {state['question']}")
+    logger.info("[BLOCKED] Question blocked: %s", state['question'])
     state["final_answer"] = (
         "I'm sorry, I can only assist with questions related to your "
         "ERGO insurance policies. This includes policy coverage, "
         "terms and conditions, policy schedule details, and payment "
         "transactions. Please ask a question related to your insurance policy."
     )
+    state["source_used"] = "blocked"
+    state["routing_info"] = state.get("routing_info") or {"route": "blocked", "reason": "question blocked"}
+    state["resolved_question"] = None
+    state["wording_chunks"] = []
+    state["schedule_text"] = None
     return state
 
 # ── Graph ─────────────────────────────────────────────────────────────
@@ -554,7 +603,7 @@ supervisor_graph = build_graph()
 
 # ── Entry Point ───────────────────────────────────────────────────────
 
-def run_supervisor(question: str, conversation_history: List[dict] = None) -> str:
+def run_supervisor(question: str, conversation_history: List[dict] = None, debug_mode: bool = False) -> Any:
     """
     Main entry point
     Accepts question and full conversation history
@@ -562,10 +611,10 @@ def run_supervisor(question: str, conversation_history: List[dict] = None) -> st
     if conversation_history is None:
         conversation_history = []
 
-    logger.info(f"[SUPERVISOR] ================================")
-    logger.info(f"[SUPERVISOR] Question: {question}")
-    logger.info(f"[SUPERVISOR] History: {len(conversation_history)} messages")
-    logger.info(f"[SUPERVISOR] ================================")
+    logger.info("[SUPERVISOR] ================================")
+    logger.info("[SUPERVISOR] Question: %s", question)
+    logger.info("[SUPERVISOR] History: %s messages", len(conversation_history))
+    logger.info("[SUPERVISOR] ================================")
 
     result = supervisor_graph.invoke({
         "question": question,
@@ -574,8 +623,11 @@ def run_supervisor(question: str, conversation_history: List[dict] = None) -> st
         "has_policy_no": None,
         "question_type": None,
         "is_relevant": None,
-        "final_answer": None
+        "final_answer": None,
+        "debug_mode": debug_mode
     })
 
-    logger.info(f"[SUPERVISOR] Answer: {result['final_answer'][:200]}...")
+    logger.info("[SUPERVISOR] Answer: %s...", result['final_answer'][:200])
+    if debug_mode:
+        return result
     return result["final_answer"]
