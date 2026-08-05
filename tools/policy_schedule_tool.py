@@ -2,7 +2,7 @@ import requests
 import base64
 import PyPDF2
 import io
-from typing import Optional
+from typing import Optional, Any
 from openai import OpenAI
 from config.settings import (
     POLICY_DOCUMENT_API_URL,
@@ -41,7 +41,7 @@ def decode_base64_to_text(base64_string: str) -> Optional[str]:
         print(f"Error decoding schedule: {e}")
         return None
 
-def answer_from_schedule(question: str, policy_no: str) -> str:
+def answer_from_schedule(question: str, policy_no: str, return_metadata: bool = False) -> Any:
     """
     Main function called by agent
     Only called when user provides a policy number
@@ -50,6 +50,8 @@ def answer_from_schedule(question: str, policy_no: str) -> str:
     # Get credentials for specific policy
     credentials = get_policy_credentials_by_no(policy_no)
     if not credentials:
+        if return_metadata:
+            return {"answer": f"Sorry, I could not find policy {policy_no} in the system. Please check the policy number and try again.", "schedule_text": None}
         return f"Sorry, I could not find policy {policy_no} in the system. Please check the policy number and try again."
 
     access_token = credentials["access_token"]
@@ -57,11 +59,15 @@ def answer_from_schedule(question: str, policy_no: str) -> str:
     # Fetch schedule
     base64_string = fetch_schedule_base64(policy_no, access_token)
     if not base64_string:
+        if return_metadata:
+            return {"answer": f"Sorry, I could not retrieve the policy schedule for {policy_no}.", "schedule_text": None}
         return f"Sorry, I could not retrieve the policy schedule for {policy_no}."
 
     # Decode to text
     schedule_text = decode_base64_to_text(base64_string)
     if not schedule_text:
+        if return_metadata:
+            return {"answer": "Sorry, I could not read the policy schedule.", "schedule_text": None}
         return "Sorry, I could not read the policy schedule."
 
         # Generate answer
@@ -92,4 +98,7 @@ def answer_from_schedule(question: str, policy_no: str) -> str:
         ]
     )
 
-    return response.choices[0].message.content
+    answer = response.choices[0].message.content
+    if return_metadata:
+        return {"answer": answer, "schedule_text": schedule_text}
+    return answer

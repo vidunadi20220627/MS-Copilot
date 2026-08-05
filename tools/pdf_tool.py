@@ -4,7 +4,7 @@ import PyPDF2
 import io
 import os
 import logging
-from typing import Optional, List
+from typing import Optional, List, Any
 from openai import OpenAI
 from vector_store.chroma import (
     get_or_create_collection,
@@ -61,10 +61,10 @@ def fetch_pdf_base64(policy_no: str, access_token: str) -> Optional[str]:
         logger.error("[FETCH PDF] API request timed out after 30 seconds")
         return None
     except requests.exceptions.HTTPError as e:
-        logger.error(f"[FETCH PDF] HTTP error: {e}")
+        logger.exception("[FETCH PDF] HTTP error")
         return None
     except Exception as e:
-        logger.error(f"[FETCH PDF] Unexpected error: {e}")
+        logger.exception("[FETCH PDF] Unexpected error")
         return None
 
 def decode_base64_to_text(base64_string: str) -> Optional[str]:
@@ -93,7 +93,7 @@ def decode_base64_to_text(base64_string: str) -> Optional[str]:
         return full_text
 
     except Exception as e:
-        logger.error(f"[DECODE PDF] Error: {e}")
+        logger.exception("[DECODE PDF] Error")
         return None
 
 def chunk_text(text: str, chunk_size: int = 500, overlap: int = 50) -> list:
@@ -161,15 +161,15 @@ def should_reindex(policy_no: str, access_token: str) -> bool:
     collection_name = f"policy_wording_{policy_no}"
 
     if not collection_exists(collection_name):
-        logger.info(f"[REINDEX CHECK] Collection not found - reindex needed")
+        logger.info("[REINDEX CHECK] Collection not found - reindex needed")
         return True
 
     cached_token = indexed_tokens.get(policy_no)
     if cached_token != access_token:
-        logger.info(f"[REINDEX CHECK] Token changed - reindex needed")
+        logger.info("[REINDEX CHECK] Token changed - reindex needed")
         return True
 
-    logger.info(f"[REINDEX CHECK] Using existing cache - no reindex needed")
+    logger.info("[REINDEX CHECK] Using existing cache - no reindex needed")
     return False
 
 def resolve_question_with_history(
@@ -254,14 +254,15 @@ Rewrite this follow-up question to be specific:"""
         return resolved
 
     except Exception as e:
-        logger.error(f"[RESOLVE QUESTION] Error resolving question: {e}")
+        logger.exception("[RESOLVE QUESTION] Error resolving question")
         return question
 
 def search_pdf(
     policy_no: str,
     question: str,
-    top_k: int = 3
-) -> Optional[str]:
+    top_k: int = 3,
+    return_metadata: bool = False
+) -> Optional[Any]:
     """Search ChromaDB for relevant chunks"""
     collection_name = f"policy_wording_{policy_no}"
     logger.info(f"[SEARCH PDF] Searching: {collection_name}")
@@ -282,6 +283,15 @@ def search_pdf(
         for i, (chunk, dist) in enumerate(zip(chunks, distances)):
             logger.info(f"[SEARCH PDF] Chunk {i + 1} distance: {dist:.4f}")
             logger.info(f"[SEARCH PDF] Chunk {i + 1} preview: {chunk[:150]}...")
+        if return_metadata:
+            return [
+                {
+                    "chunk_id": i + 1,
+                    "content": chunk,
+                    "distance": round(float(dist), 4) if dist is not None else None
+                }
+                for i, (chunk, dist) in enumerate(zip(chunks, distances))
+            ]
         return "\n\n".join(chunks)
 
     logger.warning("[SEARCH PDF] No relevant chunks found")
@@ -290,8 +300,9 @@ def search_pdf(
 def answer_from_pdf(
     question: str,
     policy_no: Optional[str] = None,
-    conversation_history: Optional[List[dict]] = None
-) -> str:
+    conversation_history: Optional[List[dict]] = None,
+    return_metadata: bool = False
+) -> Any:
     """
     Main function called by agent
 
@@ -344,16 +355,29 @@ def answer_from_pdf(
 
     # ── Step 3: Search using RESOLVED question ────────────────────
     logger.info(f"[PDF TOOL] Searching with resolved question: {resolved_question}")
-    relevant_chunks = search_pdf(policy_no, resolved_question)
+    relevant_chunks = search_pdf(
+        policy_no,
+        resolved_question,
+        return_metadata=return_metadata
+    )
 
     if not relevant_chunks:
         logger.warning("[PDF TOOL] No relevant chunks found")
+        if return_metadata:
+            return {
+                "answer": "Sorry, I could not find relevant information in the policy wording.",
+                "resolved_question": resolved_question,
+                "wording_chunks": []
+            }
         return "Sorry, I could not find relevant information in the policy wording."
 
     logger.info("[PDF TOOL] Sending to GPT for answer generation")
 
     # ── Step 4: Generate answer ───────────────────────────────────
     try:
+        context_text = relevant_chunks
+        if return_metadata and isinstance(relevant_chunks, list):
+            context_text = "\n\n".join([chunk["content"] for chunk in relevant_chunks])
         response = client.chat.completions.create(
             model="gpt-4o",
             messages=[
@@ -368,7 +392,7 @@ def answer_from_pdf(
                     "role": "user",
                     "content": f"""
                     Context from policy wording:
-                    {relevant_chunks}
+                    {context_text}
 
                     Question: {resolved_question}
                     """
