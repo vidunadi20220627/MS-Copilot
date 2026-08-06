@@ -60,10 +60,10 @@ def fetch_pdf_base64(policy_no: str, access_token: str) -> Optional[str]:
     except requests.exceptions.Timeout:
         logger.error("[FETCH PDF] API request timed out after 30 seconds")
         return None
-    except requests.exceptions.HTTPError as e:
+    except requests.exceptions.HTTPError:
         logger.exception("[FETCH PDF] HTTP error")
         return None
-    except Exception as e:
+    except Exception:
         logger.exception("[FETCH PDF] Unexpected error")
         return None
 
@@ -92,7 +92,7 @@ def decode_base64_to_text(base64_string: str) -> Optional[str]:
 
         return full_text
 
-    except Exception as e:
+    except Exception:
         logger.exception("[DECODE PDF] Error")
         return None
 
@@ -186,7 +186,6 @@ def resolve_question_with_history(
 
     question_lower = question.lower().strip()
 
-    # Check if question is vague (contains pronouns or is short)
     vague_indicators = [
         "it", "that", "this", "those", "these",
         "tell me more", "explain", "elaborate",
@@ -197,14 +196,12 @@ def resolve_question_with_history(
     is_short = len(question.split()) <= 6
 
     if not (is_vague or is_short):
-        # Question is specific enough — no need to rewrite
         return question
 
     logger.info(f"[RESOLVE QUESTION] Vague question detected: '{question}'")
     logger.info(f"[RESOLVE QUESTION] Resolving using {len(history)} history messages")
 
     try:
-        # Build history context for GPT
         recent_history = history[-6:] if len(history) > 6 else history
         history_text = "\n".join([
             f"{msg['role'].upper()}: {msg['content']}"
@@ -253,7 +250,7 @@ Rewrite this follow-up question to be specific:"""
         logger.info(f"[RESOLVE QUESTION] Resolved: '{resolved}'")
         return resolved
 
-    except Exception as e:
+    except Exception:
         logger.exception("[RESOLVE QUESTION] Error resolving question")
         return question
 
@@ -297,87 +294,41 @@ def search_pdf(
     logger.warning("[SEARCH PDF] No relevant chunks found")
     return None
 
-def answer_from_pdf(
-    question: str,
-    policy_no: Optional[str] = None,
-    conversation_history: Optional[List[dict]] = None,
-    return_metadata: bool = False
-) -> Any:
-    """
-    Main function called by agent
-
-    Two scenarios:
-    1. policy_no is None - get latest wording from DB
-    2. policy_no provided - get wording for that specific policy
-
-    Now also accepts conversation_history to resolve vague questions
-    """
-    if conversation_history is None:
-        conversation_history = []
-
-    logger.info(f"[PDF TOOL] Question: {question}")
-    logger.info(f"[PDF TOOL] Policy: {policy_no if policy_no else 'latest'}")
-    logger.info(f"[PDF TOOL] History: {len(conversation_history)} messages")
-
-    # ── Step 1: Resolve vague question using history ──────────────
-    resolved_question = resolve_question_with_history(
-        question,
-        conversation_history
-    )
-
+def _resolve_credentials(policy_no: Optional[str]) -> Optional[dict]:
+    """Fetch policy_no + access_token, either the latest or for a specific policy."""
     if policy_no is None:
         logger.info("[PDF TOOL] Fetching latest policy wording from DB")
         credentials = get_latest_policy_wording_credentials()
         if not credentials:
             logger.error("[PDF TOOL] No active policy wording found in DB")
-            return "Sorry, I could not find any active policy wording in the system."
-        policy_no = credentials["policy_no"]
-        access_token = credentials["access_token"]
-        logger.info(f"[PDF TOOL] Latest policy: {policy_no}")
-    else:
-        logger.info(f"[PDF TOOL] Fetching credentials for policy: {policy_no}")
-        credentials = get_policy_credentials_by_no(policy_no)
-        if not credentials:
-            logger.error(f"[PDF TOOL] Policy {policy_no} not found")
-            return f"Sorry, I could not find policy {policy_no} in the system."
-        access_token = credentials["access_token"]
+            return None
+        logger.info(f"[PDF TOOL] Latest policy: {credentials['policy_no']}")
+        return credentials
 
-    logger.info(f"[PDF TOOL] Token (first 8): {access_token[:8]}...")
+    logger.info(f"[PDF TOOL] Fetching credentials for policy: {policy_no}")
+    credentials = get_policy_credentials_by_no(policy_no)
+    if not credentials:
+        logger.error(f"[PDF TOOL] Policy {policy_no} not found")
+        return None
+    return credentials
 
-    # ── Step 2: Re-index if needed ────────────────────────────────
+def _ensure_pdf_indexed(policy_no: str, access_token: str) -> bool:
+    """Reindex the policy PDF if needed. Returns True on success."""
     if should_reindex(policy_no, access_token):
         logger.info(f"[PDF TOOL] Re-indexing PDF for: {policy_no}")
-        success = index_pdf(policy_no, access_token)
-        if not success:
-            return "Sorry, I could not retrieve the policy wording document."
-    else:
-        logger.info(f"[PDF TOOL] Using cached index for: {policy_no}")
+        return index_pdf(policy_no, access_token)
+    logger.info(f"[PDF TOOL] Using cached index for: {policy_no}")
+    return True
 
-    # ── Step 3: Search using RESOLVED question ────────────────────
-    logger.info(f"[PDF TOOL] Searching with resolved question: {resolved_question}")
-    relevant_chunks = search_pdf(
-        policy_no,
-        resolved_question,
-        return_metadata=return_metadata
-    )
+def _build_context_text(relevant_chunks: Any, return_metadata: bool) -> str:
+    """Flatten chunk metadata (if present) into plain context text for GPT."""
+    if return_metadata and isinstance(relevant_chunks, list):
+        return "\n\n".join(chunk["content"] for chunk in relevant_chunks)
+    return relevant_chunks
 
-    if not relevant_chunks:
-        logger.warning("[PDF TOOL] No relevant chunks found")
-        if return_metadata:
-            return {
-                "answer": "Sorry, I could not find relevant information in the policy wording.",
-                "resolved_question": resolved_question,
-                "wording_chunks": []
-            }
-        return "Sorry, I could not find relevant information in the policy wording."
-
-    logger.info("[PDF TOOL] Sending to GPT for answer generation")
-
-    # ── Step 4: Generate answer ───────────────────────────────────
+def _generate_answer_from_context(context_text: str, resolved_question: str) -> str:
+    """Call GPT to answer the resolved question using the given context."""
     try:
-        context_text = relevant_chunks
-        if return_metadata and isinstance(relevant_chunks, list):
-            context_text = "\n\n".join([chunk["content"] for chunk in relevant_chunks])
         response = client.chat.completions.create(
             model="gpt-4o",
             messages=[
@@ -404,6 +355,60 @@ def answer_from_pdf(
         logger.info(f"[PDF TOOL] Answer: {answer[:200]}...")
         return answer
 
-    except Exception as e:
-        logger.error(f"[PDF TOOL] GPT error: {e}")
+    except Exception:
+        logger.exception("[PDF TOOL] GPT error")
         return "Sorry, I encountered an error generating the answer."
+
+def answer_from_pdf(
+    question: str,
+    policy_no: Optional[str] = None,
+    conversation_history: Optional[List[dict]] = None,
+    return_metadata: bool = False
+) -> Any:
+    """
+    Main function called by agent
+
+    Two scenarios:
+    1. policy_no is None - get latest wording from DB
+    2. policy_no provided - get wording for that specific policy
+
+    Now also accepts conversation_history to resolve vague questions
+    """
+    if conversation_history is None:
+        conversation_history = []
+
+    logger.info(f"[PDF TOOL] Question: {question}")
+    logger.info(f"[PDF TOOL] Policy: {policy_no if policy_no else 'latest'}")
+    logger.info(f"[PDF TOOL] History: {len(conversation_history)} messages")
+
+    resolved_question = resolve_question_with_history(question, conversation_history)
+
+    credentials = _resolve_credentials(policy_no)
+    if not credentials:
+        if policy_no is None:
+            return "Sorry, I could not find any active policy wording in the system."
+        return f"Sorry, I could not find policy {policy_no} in the system."
+
+    policy_no = credentials["policy_no"]
+    access_token = credentials["access_token"]
+    logger.info(f"[PDF TOOL] Token (first 8): {access_token[:8]}...")
+
+    if not _ensure_pdf_indexed(policy_no, access_token):
+        return "Sorry, I could not retrieve the policy wording document."
+
+    logger.info(f"[PDF TOOL] Searching with resolved question: {resolved_question}")
+    relevant_chunks = search_pdf(policy_no, resolved_question, return_metadata=return_metadata)
+
+    if not relevant_chunks:
+        logger.warning("[PDF TOOL] No relevant chunks found")
+        if return_metadata:
+            return {
+                "answer": "Sorry, I could not find relevant information in the policy wording.",
+                "resolved_question": resolved_question,
+                "wording_chunks": []
+            }
+        return "Sorry, I could not find relevant information in the policy wording."
+
+    logger.info("[PDF TOOL] Sending to GPT for answer generation")
+    context_text = _build_context_text(relevant_chunks, return_metadata)
+    return _generate_answer_from_context(context_text, resolved_question)

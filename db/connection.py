@@ -1,3 +1,4 @@
+from typing import Optional
 from sqlalchemy import create_engine, text
 from config.settings import (
     DB_HOST, DB_PORT,
@@ -28,7 +29,7 @@ def test_connection():
         print(f"MySQL DB connection failed ❌: {e}")
         return False
 
-def get_latest_policy_wording_credentials() -> dict:
+def get_latest_policy_wording_credentials() -> Optional[dict]:
     """
     Get access_token and policy_no from the latest
     policy wording record across ALL policies
@@ -59,7 +60,7 @@ def get_latest_policy_wording_credentials() -> dict:
         print(f"Error fetching latest wording credentials: {e}")
         return None
 
-def get_policy_credentials_by_no(policy_no: str) -> dict:
+def get_policy_credentials_by_no(policy_no: str) -> Optional[dict]:
     """
     Get access_token for a SPECIFIC policy number
     Used when user provides a policy number in their question

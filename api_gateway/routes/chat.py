@@ -58,8 +58,8 @@ async def chat(request: ChatRequest):
             answer=answer
         )
 
-    except Exception as e:
-        logger.error(f"[CHAT ROUTE] Error: {e}")
+    except Exception:
+        logger.exception("[CHAT ROUTE] Error")
         return JSONResponse(
             status_code=200,
             content={
