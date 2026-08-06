@@ -23,11 +23,11 @@ logger = logging.getLogger("supervisor")
 client = OpenAI(api_key=OPENAI_API_KEY)
 
 # ── Product code prefixes for policy number validation ───────────────
-# TODO: Add all product codes here when received
+# Extension point: add product codes here as they're received
 VALID_PRODUCT_CODES = [
     "DTPS",   # Travel Per Trip
     "DPAI",   # Personal Accident
-    # TODO: add more product codes here
+    # Extension point: add more product codes here
 ]
 
 # ── Followup indicators ───────────────────────────────────────────────
@@ -73,15 +73,13 @@ def extract_policy_no_from_history(
     Allows user to mention policy once and not
     repeat it in every subsequent message
     """
-    # Check current question first
     policy_no = extract_policy_no_from_text(current_question)
     if policy_no:
         logger.info(f"[POLICY EXTRACT] Found in current question: {policy_no}")
         return policy_no
 
-    # Not in current question — search history
     logger.info("[POLICY EXTRACT] Not in current question — searching history...")
-    for message in reversed(history):  # most recent first
+    for message in reversed(history):
         policy_no = extract_policy_no_from_text(message.get("content", ""))
         if policy_no:
             logger.info(f"[POLICY EXTRACT] Found in history: {policy_no}")
@@ -109,7 +107,6 @@ def is_followup_question(question: str) -> bool:
     """
     question_lower = question.lower().strip()
 
-    # Very short questions are likely followups
     word_count = len(question_lower.split())
     if word_count <= 4:
         logger.info(
@@ -118,7 +115,6 @@ def is_followup_question(question: str) -> bool:
         )
         return True
 
-    # Check for followup indicator words
     for indicator in FOLLOWUP_INDICATORS:
         if indicator in question_lower:
             logger.info(
@@ -137,7 +133,6 @@ def has_insurance_context_in_history(history: List[dict]) -> bool:
     if not history:
         return False
 
-    # Check last 6 messages (3 exchanges)
     recent = history[-6:]
 
     insurance_context_keywords = [
@@ -161,70 +156,52 @@ def has_insurance_context_in_history(history: List[dict]) -> bool:
     logger.info("[HISTORY CHECK] No insurance context in recent history")
     return False
 
-# ── Main Classification ───────────────────────────────────────────────
+# ── Classification helpers ──────────────────────────────────────────────
 
-def classify_question(state: AgentState) -> AgentState:
-    """
-    Step 1: Extract policy number from question OR history
-    Step 2: Check if question is a followup with pronouns
-            If yes and history has insurance context → relevant
-    Step 3: If not followup → classify with GPT using keywords
-    Step 4: Determine question type
-    """
-    question = state["question"]
-    history = state.get("conversation_history", [])
+def _set_question_type(state: AgentState) -> None:
+    """Determine question_type based on is_relevant and has_policy_no."""
+    if not state["is_relevant"]:
+        state["question_type"] = None
+    elif state["has_policy_no"]:
+        state["question_type"] = "wording_and_schedule"
+    else:
+        state["question_type"] = "wording_only"
 
-    logger.info("[CLASSIFIER] ========================")
-    logger.info("[CLASSIFIER] Question: %s", question)
-    logger.info("[CLASSIFIER] History length: %s messages", len(history))
+def _handle_followup(
+    state: AgentState,
+    history: List[dict]
+) -> AgentState:
+    """Handle classification for a detected followup question using history context."""
+    logger.info("[CLASSIFIER] Detected followup question — checking history")
 
-    # ── Extract policy number ─────────────────────────────────────
-    policy_no = extract_policy_no_from_history(question, history)
-    state["policy_no"] = policy_no
-    state["has_policy_no"] = policy_no is not None
-    logger.info(f"[CLASSIFIER] Policy number: {policy_no}")
+    if has_insurance_context_in_history(history):
+        logger.info(
+            "[CLASSIFIER] Insurance context in history — marking as relevant "
+        )
+        state["is_relevant"] = True
+        _set_question_type(state)
 
-    # ── Step 1: Check if followup question ───────────────────────
-    # Handle pronouns like "that", "it", "this"
-    # before sending to GPT classifier
-    if is_followup_question(question):
-        logger.info("[CLASSIFIER] Detected followup question — checking history")
+        logger.info(
+            "[CLASSIFIER] Followup result — is_relevant=True | question_type=%s",
+            state['question_type']
+        )
+        state["routing_info"] = {
+            "route": state['question_type'],
+            "reason": "insurance context in history"
+        }
+        return state
 
-        if has_insurance_context_in_history(history):
-            logger.info(
-                "[CLASSIFIER] Insurance context in history — "
-                "marking as relevant "
-            )
-            state["is_relevant"] = True
+    logger.info(
+        "[CLASSIFIER] No insurance context in history — "
+        "blocking followup question"
+    )
+    state["is_relevant"] = False
+    state["question_type"] = None
+    state["routing_info"] = {"route": "blocked", "reason": "no insurance context in history"}
+    return state
 
-            # Set question type based on policy number
-            if state["has_policy_no"]:
-                state["question_type"] = "wording_and_schedule"
-            else:
-                state["question_type"] = "wording_only"
-
-            logger.info(
-                "[CLASSIFIER] Followup result — is_relevant=True | question_type=%s",
-                state['question_type']
-            )
-            state["routing_info"] = {
-                "route": state['question_type'],
-                "reason": "insurance context in history"
-            }
-            return state
-
-        else:
-            logger.info(
-                "[CLASSIFIER] No insurance context in history — "
-                "blocking followup question"
-            )
-            state["is_relevant"] = False
-            state["question_type"] = None
-            state["routing_info"] = {"route": "blocked", "reason": "no insurance context in history"}
-            return state
-
-    # ── Step 2: Normal GPT classification ────────────────────────
-    # Not a followup — classify normally with keywords
+def _run_gpt_classification(state: AgentState, question: str, history: List[dict]) -> None:
+    """Classify question relevance using GPT when it's not an obvious followup."""
     logger.info("[CLASSIFIER] Not a followup — running GPT classification")
 
     try:
@@ -303,14 +280,8 @@ def classify_question(state: AgentState) -> AgentState:
             }
         ]
 
-        # Add conversation history for context
         messages.extend(build_history_for_gpt(history))
-
-        # Add current question
-        messages.append({
-            "role": "user",
-            "content": question
-        })
+        messages.append({"role": "user", "content": question})
 
         response = client.chat.completions.create(
             model="gpt-4o",
@@ -322,20 +293,45 @@ def classify_question(state: AgentState) -> AgentState:
         state["is_relevant"] = result.get("is_relevant", False)
         logger.info(f"[CLASSIFIER] GPT result: {result}")
 
-    except Exception as e:
-        logger.error(f"[CLASSIFIER] GPT error: {e}")
-        # Default to relevant if classification fails
-        # Better to attempt answer than wrongly block
+    except Exception:
+        logger.exception("[CLASSIFIER] GPT error")
         state["is_relevant"] = True
 
-    # ── Set question type ─────────────────────────────────────────
-    if state["is_relevant"]:
-        if state["has_policy_no"]:
-            state["question_type"] = "wording_and_schedule"
-        else:
-            state["question_type"] = "wording_only"
-    else:
-        state["question_type"] = None
+def _routing_reason(state: AgentState) -> str:
+    """Build a human-readable reason string for the routing decision."""
+    if not state.get("is_relevant"):
+        return "question blocked"
+    if state.get("has_policy_no"):
+        return "policy number found"
+    return "no policy number"
+
+# ── Main Classification ───────────────────────────────────────────────
+
+def classify_question(state: AgentState) -> AgentState:
+    """
+    Step 1: Extract policy number from question OR history
+    Step 2: Check if question is a followup with pronouns
+            If yes and history has insurance context → relevant
+    Step 3: If not followup → classify with GPT using keywords
+    Step 4: Determine question type
+    """
+    question = state["question"]
+    history = state.get("conversation_history", [])
+
+    logger.info("[CLASSIFIER] ========================")
+    logger.info("[CLASSIFIER] Question: %s", question)
+    logger.info("[CLASSIFIER] History length: %s messages", len(history))
+
+    policy_no = extract_policy_no_from_history(question, history)
+    state["policy_no"] = policy_no
+    state["has_policy_no"] = policy_no is not None
+    logger.info(f"[CLASSIFIER] Policy number: {policy_no}")
+
+    if is_followup_question(question):
+        return _handle_followup(state, history)
+
+    _run_gpt_classification(state, question, history)
+    _set_question_type(state)
 
     logger.info(
         "[CLASSIFIER] Final — %s | %s | %s",
@@ -346,8 +342,7 @@ def classify_question(state: AgentState) -> AgentState:
 
     state["routing_info"] = {
         "route": route_question(state),
-        "reason": "policy number found" if state.get("has_policy_no") else "no policy number"
-        if state.get("is_relevant") else "question blocked"
+        "reason": _routing_reason(state)
     }
 
     return state
@@ -381,7 +376,6 @@ def handle_wording_only(state: AgentState) -> AgentState:
 
     history = state.get("conversation_history", [])
 
-    # Get base answer from PDF tool
     debug_mode = state.get("debug_mode", False)
     pdf_result = answer_from_pdf(
         question=state["question"],
@@ -400,7 +394,6 @@ def handle_wording_only(state: AgentState) -> AgentState:
 
     logger.info("[WORDING ONLY] Raw answer: %s...", raw_answer[:200])
 
-    # Use GPT to make answer conversational with history context
     try:
         messages = [
             {
@@ -415,10 +408,8 @@ def handle_wording_only(state: AgentState) -> AgentState:
             }
         ]
 
-        # Add history
         messages.extend(build_history_for_gpt(history))
 
-        # Add current question with raw answer as context
         messages.append({
             "role": "user",
             "content": f"""
@@ -464,7 +455,6 @@ def handle_wording_and_schedule(state: AgentState) -> AgentState:
     logger.info("[WORDING AND SCHEDULE] Policy: %s", policy_no)
     debug_mode = state.get("debug_mode", False)
 
-    # Get wording answer
     logger.info("[WORDING AND SCHEDULE] Fetching wording for %s", policy_no)
     wording_result = answer_from_pdf(
         question=question,
@@ -482,7 +472,6 @@ def handle_wording_and_schedule(state: AgentState) -> AgentState:
         state["wording_chunks"] = []
     logger.info("[WORDING AND SCHEDULE] Wording: %s...", wording_answer[:200])
 
-    # Get schedule answer
     logger.info("[WORDING AND SCHEDULE] Fetching schedule for %s", policy_no)
     schedule_result = answer_from_schedule(
         question=question,
@@ -497,7 +486,6 @@ def handle_wording_and_schedule(state: AgentState) -> AgentState:
         state["schedule_text"] = None
     logger.info("[WORDING AND SCHEDULE] Schedule: %s...", schedule_answer[:200])
 
-    # Combine with history context
     try:
         messages = [
             {
@@ -513,10 +501,8 @@ def handle_wording_and_schedule(state: AgentState) -> AgentState:
             }
         ]
 
-        # Add history
         messages.extend(build_history_for_gpt(history))
 
-        # Add current context
         messages.append({
             "role": "user",
             "content": f"""
