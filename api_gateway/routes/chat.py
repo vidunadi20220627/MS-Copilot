@@ -3,6 +3,7 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 from typing import List, Optional
 from agents.supervisor import run_supervisor
+from utils.qa_logger import log_qa
 import logging
 
 logger = logging.getLogger("chat_route")
@@ -16,6 +17,7 @@ class Message(BaseModel):
 class ChatRequest(BaseModel):
     question: str
     conversation_history: Optional[List[Message]] = []
+    conversation_id: Optional[str] = None   # groups messages from the same browser session
 
 class ChatResponse(BaseModel):
     question: str
@@ -26,7 +28,8 @@ async def chat(request: ChatRequest):
     """
     Main chat endpoint
     Accepts question + full conversation history
-    Returns answer
+    Returns answer, and silently logs the exchange server-side
+    for later accuracy review — no user action required
     """
     if not request.question or request.question.strip() == "":
         return JSONResponse(
@@ -38,7 +41,6 @@ async def chat(request: ChatRequest):
         )
 
     try:
-        # Convert history to list of dicts
         history = [
             {"role": msg.role, "content": msg.content}
             for msg in request.conversation_history
@@ -47,10 +49,28 @@ async def chat(request: ChatRequest):
         logger.info(f"[CHAT ROUTE] Question: {request.question}")
         logger.info(f"[CHAT ROUTE] History length: {len(history)}")
 
-        # Pass both question and history to supervisor
-        answer = run_supervisor(
+        # debug_mode=True so we get resolved_question, routing_info,
+        # wording_chunks etc back for logging. The frontend still only
+        # ever receives the plain "answer" field below.
+        result = run_supervisor(
             question=request.question,
-            conversation_history=history
+            conversation_history=history,
+            debug_mode=True
+        )
+
+        answer = result["final_answer"]
+
+        log_qa(
+            question=request.question,
+            answer=answer,
+            resolved_question=result.get("resolved_question"),
+            policy_no=result.get("policy_no"),
+            source_used=result.get("source_used"),
+            routing_info=result.get("routing_info"),
+            wording_chunks=result.get("wording_chunks"),
+            schedule_text_present=bool(result.get("schedule_text")),
+            conversation_history_length=len(history),
+            conversation_id=request.conversation_id,
         )
 
         return ChatResponse(
