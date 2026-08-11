@@ -5,6 +5,7 @@ from typing import List, Optional
 from agents.supervisor import run_supervisor
 from utils.qa_logger import log_qa
 import logging
+import time
 
 logger = logging.getLogger("chat_route")
 
@@ -17,11 +18,12 @@ class Message(BaseModel):
 class ChatRequest(BaseModel):
     question: str
     conversation_history: Optional[List[Message]] = []
-    conversation_id: Optional[str] = None   # groups messages from the same browser session
+    conversation_id: Optional[str] = None
 
 class ChatResponse(BaseModel):
     question: str
     answer: str
+    response_time_seconds: float
 
 @router.post("/chat", response_model=ChatResponse)
 async def chat(request: ChatRequest):
@@ -36,9 +38,12 @@ async def chat(request: ChatRequest):
             status_code=200,
             content={
                 "question": request.question,
-                "answer": "Please enter a question so I can help you."
+                "answer": "Please enter a question so I can help you.",
+                "response_time_seconds": 0
             }
         )
+
+    start_time = time.perf_counter()
 
     try:
         history = [
@@ -60,6 +65,9 @@ async def chat(request: ChatRequest):
 
         answer = result["final_answer"]
 
+        response_time = round(time.perf_counter() - start_time, 2)
+        logger.info(f"[CHAT ROUTE] Response time: {response_time}s")
+
         log_qa(
             question=request.question,
             answer=answer,
@@ -75,16 +83,19 @@ async def chat(request: ChatRequest):
 
         return ChatResponse(
             question=request.question,
-            answer=answer
+            answer=answer,
+            response_time_seconds=response_time
         )
 
     except Exception:
         logger.exception("[CHAT ROUTE] Error")
+        response_time = round(time.perf_counter() - start_time, 2)
         return JSONResponse(
             status_code=200,
             content={
                 "question": request.question,
-                "answer": "I encountered an issue processing your request. Please try again."
+                "answer": "I encountered an issue processing your request. Please try again.",
+                "response_time_seconds": response_time
             }
         )
 
