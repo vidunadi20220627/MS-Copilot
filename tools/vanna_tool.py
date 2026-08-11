@@ -19,8 +19,11 @@ class InsuranceVanna(ChromaDB_VectorStore, OpenAI_Chat):
 vn = InsuranceVanna(config={
     "api_key": OPENAI_API_KEY,
     "model": "gpt-4o",
-    "path": f"{CHROMA_DB_PATH}/vanna"
+    "path": f"{CHROMA_DB_PATH}/vanna",
+    "max_retries": 3,
+    "timeout": 20.0
 })
+
 
 def setup_vanna():
     """Connect Vanna to MySQL and train with views"""
@@ -114,6 +117,11 @@ def answer_from_db(question: str) -> str:
     try:
         sql = vn.generate_sql(question)
         print(f"Generated SQL: {sql}")
+
+        # Guard: only execute if it actually looks like SQL
+        if not sql.strip().upper().startswith("SELECT"):
+            return "I don't have that information available — it isn't part of the data I can access."
+
         result = vn.run_sql(sql)
         if result is None or result.empty:
             return "No data found for your query."

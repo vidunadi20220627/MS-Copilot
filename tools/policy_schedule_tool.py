@@ -2,7 +2,7 @@ import requests
 import base64
 import PyPDF2
 import io
-from typing import Optional
+from typing import Optional, Any
 from openai import OpenAI
 from config.settings import (
     POLICY_DOCUMENT_API_URL,
@@ -10,7 +10,11 @@ from config.settings import (
 )
 from db.connection import get_policy_credentials_by_no
 
-client = OpenAI(api_key=OPENAI_API_KEY)
+client = OpenAI(
+    api_key=OPENAI_API_KEY,
+    max_retries=3,
+    timeout=20.0
+)
 
 def fetch_schedule_base64(policy_no: str, access_token: str) -> Optional[str]:
     """Call API and get Base64 encoded policy schedule"""
@@ -37,7 +41,7 @@ def decode_base64_to_text(base64_string: str) -> Optional[str]:
         print(f"Error decoding schedule: {e}")
         return None
 
-def answer_from_schedule(question: str, policy_no: str) -> str:
+def answer_from_schedule(question: str, policy_no: str, return_metadata: bool = False) -> Any:
     """
     Main function called by agent
     Only called when user provides a policy number
@@ -46,6 +50,8 @@ def answer_from_schedule(question: str, policy_no: str) -> str:
     # Get credentials for specific policy
     credentials = get_policy_credentials_by_no(policy_no)
     if not credentials:
+        if return_metadata:
+            return {"answer": f"Sorry, I could not find policy {policy_no} in the system. Please check the policy number and try again.", "schedule_text": None}
         return f"Sorry, I could not find policy {policy_no} in the system. Please check the policy number and try again."
 
     access_token = credentials["access_token"]
@@ -53,23 +59,32 @@ def answer_from_schedule(question: str, policy_no: str) -> str:
     # Fetch schedule
     base64_string = fetch_schedule_base64(policy_no, access_token)
     if not base64_string:
+        if return_metadata:
+            return {"answer": f"Sorry, I could not retrieve the policy schedule for {policy_no}.", "schedule_text": None}
         return f"Sorry, I could not retrieve the policy schedule for {policy_no}."
 
     # Decode to text
     schedule_text = decode_base64_to_text(base64_string)
     if not schedule_text:
+        if return_metadata:
+            return {"answer": "Sorry, I could not read the policy schedule.", "schedule_text": None}
         return "Sorry, I could not read the policy schedule."
 
-    # Generate answer
+        # Generate answer
     response = client.chat.completions.create(
         model="gpt-4o",
         messages=[
             {
                 "role": "system",
-                "content": """You are a helpful insurance assistant.
-                Answer the user question using only the provided
-                policy schedule content. Be clear and concise.
-                If the answer is not in the schedule say so."""
+                "content": """You are an insurance assistant for brokers.
+                Answer using ONLY the provided policy schedule content.
+
+                Format rules:
+                - If the answer has more than one distinct point (e.g. multiple benefits, multiple dates), use short bullet points (start each with "- ")
+                - If it's a single fact, answer in one short sentence — no bullets needed
+                - No preamble, no repeating the question
+                - Each bullet should be one short phrase, not a paragraph
+                - If the answer is not in the schedule, say so in one line"""
             },
             {
                 "role": "user",
@@ -83,4 +98,7 @@ def answer_from_schedule(question: str, policy_no: str) -> str:
         ]
     )
 
-    return response.choices[0].message.content
+    answer = response.choices[0].message.content
+    if return_metadata:
+        return {"answer": answer, "schedule_text": schedule_text}
+    return answer

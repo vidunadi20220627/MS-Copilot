@@ -1,9 +1,20 @@
-from typing import TypedDict, Optional
+from typing import TypedDict, Optional, List, Any
 
-class AgentState(TypedDict):
+class Message(TypedDict):
+    role: str     # "user" or "assistant"
+    content: str  # message text
+
+class AgentState(TypedDict, total=False):
     question: str
-    policy_no: Optional[str]        # extracted from question if present
-    has_policy_no: Optional[bool]   # True if valid policy no found
-    question_type: Optional[str]    # "wording_only" or "wording_and_schedule"
-    is_relevant: Optional[bool]     # True if insurance related
+    conversation_history: List[Message]  # full chat history
+    policy_no: Optional[str]             # extracted from question OR history
+    has_policy_no: Optional[bool]
+    question_type: Optional[str]
+    is_relevant: Optional[bool]
     final_answer: Optional[str]
+    source_used: Optional[str]
+    routing_info: Optional[dict]
+    resolved_question: Optional[str]
+    wording_chunks: Optional[List[dict]]
+    schedule_text: Optional[str]
+    debug_mode: Optional[bool]
