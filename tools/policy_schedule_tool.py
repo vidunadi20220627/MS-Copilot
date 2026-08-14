@@ -9,6 +9,7 @@ from config.settings import (
     OPENAI_API_KEY
 )
 from db.connection import get_policy_credentials_by_no
+from tools.pdf_tool import clean_pdf_text
 
 client = OpenAI(
     api_key=OPENAI_API_KEY,
@@ -29,13 +30,17 @@ def fetch_schedule_base64(policy_no: str, access_token: str) -> Optional[str]:
         return None
 
 def decode_base64_to_text(base64_string: str) -> Optional[str]:
-    """Decode Base64 to PDF text"""
+    """Decode Base64 to PDF text, then clean it."""
     try:
         pdf_bytes = base64.b64decode(base64_string)
         pdf_reader = PyPDF2.PdfReader(io.BytesIO(pdf_bytes))
         full_text = ""
         for page in pdf_reader.pages:
             full_text += page.extract_text() + "\n"
+
+        # Apply text cleaning to fix broken words from PyPDF2
+        full_text = clean_pdf_text(full_text)
+
         return full_text
     except Exception as e:
         print(f"Error decoding schedule: {e}")
