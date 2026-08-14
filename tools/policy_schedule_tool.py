@@ -2,6 +2,7 @@ import requests
 import base64
 import PyPDF2
 import io
+import logging
 from typing import Optional, Any
 from openai import OpenAI
 from config.settings import (
@@ -10,6 +11,8 @@ from config.settings import (
 )
 from db.connection import get_policy_credentials_by_no
 from tools.pdf_tool import clean_pdf_text
+
+logger = logging.getLogger("policy_schedule_tool")
 
 client = OpenAI(
     api_key=OPENAI_API_KEY,
@@ -26,7 +29,7 @@ def fetch_schedule_base64(policy_no: str, access_token: str) -> Optional[str]:
         data = response.json()
         return data.get("document")
     except Exception as e:
-        print(f"Error fetching schedule: {e}")
+        logger.exception("Error fetching schedule: %s", e)
         return None
 
 def decode_base64_to_text(base64_string: str) -> Optional[str]:
@@ -43,7 +46,7 @@ def decode_base64_to_text(base64_string: str) -> Optional[str]:
 
         return full_text
     except Exception as e:
-        print(f"Error decoding schedule: {e}")
+        logger.exception("Error decoding schedule: %s", e)
         return None
 
 def answer_from_schedule(question: str, policy_no: str, return_metadata: bool = False) -> Any:
@@ -75,7 +78,7 @@ def answer_from_schedule(question: str, policy_no: str, return_metadata: bool = 
             return {"answer": "Sorry, I could not read the policy schedule.", "schedule_text": None}
         return "Sorry, I could not read the policy schedule."
 
-        # Generate answer
+    # Generate answer
     response = client.chat.completions.create(
         model="gpt-4o-mini",
         messages=[

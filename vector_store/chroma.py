@@ -1,7 +1,10 @@
+import logging
 import chromadb
 from chromadb.config import Settings
 from config.settings import CHROMA_DB_PATH
 from typing import Optional
+
+logger = logging.getLogger("chroma")
 
 
 def get_chroma_client():
@@ -34,9 +37,9 @@ def delete_collection(collection_name: str):
     client = get_chroma_client()
     try:
         client.delete_collection(collection_name)
-        print(f"Collection {collection_name} deleted ✅")
+        logger.info("Collection %s deleted ✅", collection_name)
     except Exception as e:
-        print(f"Collection not found: {e}")
+        logger.warning("Collection not found: %s", e)
 
 def collection_exists(collection_name: str) -> bool:
     client = get_chroma_client()
