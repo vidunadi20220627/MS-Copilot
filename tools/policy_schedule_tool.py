@@ -72,7 +72,7 @@ def answer_from_schedule(question: str, policy_no: str, return_metadata: bool = 
 
         # Generate answer
     response = client.chat.completions.create(
-        model="gpt-4o",
+        model="gpt-4o-mini",
         messages=[
             {
                 "role": "system",

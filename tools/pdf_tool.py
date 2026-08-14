@@ -177,7 +177,7 @@ def resolve_question_with_history(
     history: List[dict]
 ) -> str:
     """
-    KEY FIX: Rewrite vague questions using conversation history
+    Rewrite vague questions using conversation history
     Turns "tell me more about it" into a specific searchable question
     Uses GPT to understand what "it" refers to from history
     """
@@ -185,17 +185,23 @@ def resolve_question_with_history(
         return question
 
     question_lower = question.lower().strip()
+    word_count = len(question.split())
 
-    vague_indicators = [
+    # Only treat as vague if the question STARTS with a pronoun/vague
+    # opener, or is very short. A plain substring match on words like
+    # "this"/"it" fires on complete, self-contained questions too
+    # (e.g. "what is not covered by this travel insurance?"), causing
+    # an unnecessary extra GPT call on almost every question.
+    vague_openers = [
         "it", "that", "this", "those", "these",
         "tell me more", "explain", "elaborate",
         "what about", "more about", "go on"
     ]
 
-    is_vague = any(indicator in question_lower for indicator in vague_indicators)
-    is_short = len(question.split()) <= 6
+    starts_vague = any(question_lower.startswith(opener) for opener in vague_openers)
+    is_short = word_count <= 5
 
-    if not (is_vague or is_short):
+    if not (starts_vague or is_short):
         return question
 
     logger.info(f"[RESOLVE QUESTION] Vague question detected: '{question}'")
@@ -209,7 +215,7 @@ def resolve_question_with_history(
         ])
 
         response = client.chat.completions.create(
-            model="gpt-4o",
+            model="gpt-4o-mini",
             messages=[
                 {
                     "role": "system",
