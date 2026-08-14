@@ -6,8 +6,11 @@ from openai import OpenAI
 from config.settings import OPENAI_API_KEY
 import json
 import re
+import os
+import hashlib  # nosec: used for non-security change detection only
 import logging
 from typing import Optional, List, Any
+from vector_store.chroma import get_or_create_collection, delete_collection
 
 # ── Logging Setup ────────────────────────────────────────────────────
 logging.basicConfig(
@@ -29,6 +32,37 @@ VALID_PRODUCT_CODES = [
     "DPAI",   # Personal Accident
     # Extension point: add more product codes here
 ]
+
+# ── Keywords for Vector Relevance Classification ────────────────────────
+# Keywords are loaded from an external file so non-developers can edit them.
+# File: config/insurance_keywords.txt  (one keyword per line, # for comments)
+
+_KEYWORDS_FILE = os.path.join(os.path.dirname(__file__), "..", "config", "insurance_keywords.txt")
+
+def _load_keywords_from_file() -> List[str]:
+    """Load insurance keywords from the external text file.
+    Skips blank lines and lines starting with #."""
+    filepath = os.path.abspath(_KEYWORDS_FILE)
+    if not os.path.exists(filepath):
+        logger.error("[KEYWORDS] File not found: %s", filepath)
+        return []
+
+    keywords = []
+    with open(filepath, "r", encoding="utf-8") as f:
+        for line in f:
+            stripped = line.strip()
+            if stripped and not stripped.startswith("#"):
+                keywords.append(stripped)
+
+    logger.info("[KEYWORDS] Loaded %s keywords from %s", len(keywords), filepath)
+    return keywords
+
+def _hash_keywords(keywords: List[str]) -> str:
+    """Return a short hash of the keyword list for change detection."""
+    content = "\n".join(sorted(keywords))
+    return hashlib.sha256(content.encode("utf-8")).hexdigest()
+
+INSURANCE_KEYWORDS = _load_keywords_from_file()
 
 # ── Routing reason constants ──────────────────────────────────────────
 REASON_POLICY_NUMBER_FOUND = "policy number found"
@@ -78,14 +112,14 @@ def extract_policy_no_from_history(
     """
     policy_no = extract_policy_no_from_text(current_question)
     if policy_no:
-        logger.info(f"[POLICY EXTRACT] Found in current question: {policy_no}")
+        logger.info("[POLICY EXTRACT] Found in current question: %s", policy_no)
         return policy_no
 
     logger.info("[POLICY EXTRACT] Not in current question — searching history...")
     for message in reversed(history):
         policy_no = extract_policy_no_from_text(message.get("content", ""))
         if policy_no:
-            logger.info(f"[POLICY EXTRACT] Found in history: {policy_no}")
+            logger.info("[POLICY EXTRACT] Found in history: %s", policy_no)
             return policy_no
 
     logger.info("[POLICY EXTRACT] No policy number found in question or history")
@@ -113,15 +147,16 @@ def is_followup_question(question: str) -> bool:
     word_count = len(question_lower.split())
     if word_count <= 4:
         logger.info(
-            f"[FOLLOWUP CHECK] Short question ({word_count} words) "
-            f"— likely a followup"
+            "[FOLLOWUP CHECK] Short question (%s words) — likely a followup",
+            word_count
         )
         return True
 
     for indicator in FOLLOWUP_INDICATORS:
         if indicator in question_lower:
             logger.info(
-                f"[FOLLOWUP CHECK] Found followup indicator: '{indicator}'"
+                "[FOLLOWUP CHECK] Found followup indicator: '%s'",
+                indicator
             )
             return True
 
@@ -151,13 +186,86 @@ def has_insurance_context_in_history(history: List[dict]) -> bool:
         for keyword in insurance_context_keywords:
             if keyword.lower() in content:
                 logger.info(
-                    f"[HISTORY CHECK] Insurance context found: "
-                    f"'{keyword}' in recent history"
+                    "[HISTORY CHECK] Insurance context found: '%s' in recent history",
+                    keyword
                 )
                 return True
 
     logger.info("[HISTORY CHECK] No insurance context in recent history")
     return False
+
+# ── Vector Relevance Classification ───────────────────────────────────
+
+def _init_keyword_collection():
+    """Initialize and populate the keyword vector collection.
+    Auto-rebuilds if the keywords file has been edited (hash mismatch)."""
+    current_hash = _hash_keywords(INSURANCE_KEYWORDS)
+    collection = get_or_create_collection(
+        "insurance_keywords",
+        metadata={"keywords_hash": current_hash}
+    )
+
+    # Check if keywords changed since last build
+    stored_hash = (collection.metadata or {}).get("keywords_hash")
+    needs_rebuild = collection.count() == 0 or stored_hash != current_hash
+
+    if needs_rebuild:
+        logger.info("[KEYWORD INIT] Keywords changed or collection empty — rebuilding...")
+        delete_collection("insurance_keywords")
+        collection = get_or_create_collection(
+            "insurance_keywords",
+            metadata={"keywords_hash": current_hash}
+        )
+
+        # Batch embed all keywords in one API call
+        response = client.embeddings.create(
+            input=INSURANCE_KEYWORDS,
+            model="text-embedding-3-small"
+        )
+        embeddings = [data.embedding for data in response.data]
+        ids = [f"kw_{i}" for i in range(len(INSURANCE_KEYWORDS))]
+
+        collection.add(
+            documents=INSURANCE_KEYWORDS,
+            embeddings=embeddings,
+            ids=ids
+        )
+        logger.info("[KEYWORD INIT] Added %s keywords to ChromaDB.", len(INSURANCE_KEYWORDS))
+    return collection
+
+def _check_keyword_relevance_vector(question: str) -> bool:
+    """
+    Embed the question and do a vector similarity search against known keywords.
+    Returns True if a strong match is found.
+    """
+    collection = _init_keyword_collection()
+    
+    # Embed the incoming question
+    response = client.embeddings.create(
+        input=question,
+        model="text-embedding-3-small"
+    )
+    query_embedding = response.data[0].embedding
+    
+    # Query ChromaDB for top 3 closest keywords
+    results = collection.query(
+        query_embeddings=[query_embedding],
+        n_results=3
+    )
+    
+    if results['distances'] and len(results['distances'][0]) > 0:
+        best_distance = results['distances'][0][0]
+        best_keyword = results['documents'][0][0]
+        
+        # Threshold: cosine distance < 0.65 means strong semantic similarity
+        if best_distance < 0.65:
+            logger.info("[VECTOR CLASSIFIER] Match found: '%s' (Distance: %.3f)", best_keyword, best_distance)
+            return True
+        else:
+            logger.info("[VECTOR CLASSIFIER] No strong match. Best was: '%s' (Distance: %.3f)", best_keyword, best_distance)
+    
+    return False
+
 
 # ── Classification helpers ──────────────────────────────────────────────
 
@@ -229,45 +337,6 @@ def _run_gpt_classification(state: AgentState, question: str, history: List[dict
                 → Follow up questions about previously discussed
                   insurance topics
 
-                INSURANCE KEYWORDS — question is relevant if it contains
-                or relates to any of:
-                Accident, Accidental, Act of War, Administrative charges,
-                ATM, AIDS, Acquired immune deficiency syndrome,
-                Opportunistic infection, Malignant neoplasm,
-                Acts of Terrorism, Country of residence,
-                Child, Children, Common carrier,
-                Civil unrest, Riot, Commotion,
-                Depreciation scale, Expedition,
-                Extreme sports, Sporting activities,
-                Golfing equipment, Hostage,
-                Household contents, Hospital,
-                Hospital confinement, Insured Person,
-                Insolvency, Injury, Jewellery, Kidnap,
-                Laptop computer, Loss of limb,
-                Loss of hearing, Loss of sight,
-                Loss of speech, Dental expenses,
-                Major travel event, Manual work,
-                Medical expenses, Medical practitioner,
-                Mountaineering, Natural disasters,
-                Nuclear terrorism, Chemical terrorism,
-                Biological terrorism, Overseas, Physician,
-                Payment card, Partial disablement, Permanent,
-                Pre-existing medical condition, Public place,
-                Relative, Selected plan, Serious injury,
-                Serious sickness, Sickness, Stolen, Strike,
-                Total Disablement, Travel companion,
-                Travel agent, Trip, Valuables, War,
-                Area of Cover, Individual Cover,
-                Adult and Child Cover, Family Cover,
-                Multiple Individuals, ERGO Assistance,
-                Chronic, Claim, COVID-19, ERGO,
-                Policy, Premium, Coverage, Benefit,
-                Exclusion, Deductible, Endorsement,
-                Grace period, Lapse, Renewal, Reinstatement,
-                Sum assured, Sum insured, Repatriation,
-                Evacuation, Baggage, Passport, Flight delay,
-                Trip cancellation, Trip curtailment
-
                 IMPORTANT CONTEXT RULE:
                 If the conversation history is about insurance and the
                 current question is clearly continuing that conversation
@@ -294,10 +363,13 @@ def _run_gpt_classification(state: AgentState, question: str, history: List[dict
 
         result = json.loads(response.choices[0].message.content)
         state["is_relevant"] = result.get("is_relevant", False)
-        logger.info(f"[CLASSIFIER] GPT result: {result}")
+        logger.info("[CLASSIFIER] GPT result: %s", result)
 
-    except Exception:
-        logger.exception("[CLASSIFIER] GPT error")
+    except (json.JSONDecodeError, KeyError, IndexError):
+        logger.exception("[CLASSIFIER] GPT response parsing error")
+        state["is_relevant"] = True
+    except Exception:  # noqa: BLE001
+        logger.exception("[CLASSIFIER] GPT API error")
         state["is_relevant"] = True
 
 def _routing_reason(state: AgentState) -> str:
@@ -315,8 +387,9 @@ def classify_question(state: AgentState) -> AgentState:
     Step 1: Extract policy number from question OR history
     Step 2: Check if question is a followup with pronouns
             If yes and history has insurance context → relevant
-    Step 3: If not followup → classify with GPT using keywords
-    Step 4: Determine question type
+    Step 3: If not followup → try vector keyword search
+    Step 4: If vector search fails, classify with GPT
+    Step 5: Determine question type
     """
     question = state["question"]
     history = state.get("conversation_history", [])
@@ -328,12 +401,16 @@ def classify_question(state: AgentState) -> AgentState:
     policy_no = extract_policy_no_from_history(question, history)
     state["policy_no"] = policy_no
     state["has_policy_no"] = policy_no is not None
-    logger.info(f"[CLASSIFIER] Policy number: {policy_no}")
+    logger.info("[CLASSIFIER] Policy number: %s", policy_no)
 
     if is_followup_question(question):
         return _handle_followup(state, history)
 
-    _run_gpt_classification(state, question, history)
+    if _check_keyword_relevance_vector(question):
+        state["is_relevant"] = True
+    else:
+        _run_gpt_classification(state, question, history)
+        
     _set_question_type(state)
 
     logger.info(
@@ -510,7 +587,10 @@ def handle_wording_and_schedule(state: AgentState) -> AgentState:
         response = client.chat.completions.create(model="gpt-4o", messages=messages)
         state["final_answer"] = response.choices[0].message.content
 
-    except Exception:
+    except (json.JSONDecodeError, KeyError, IndexError):
+        logger.exception("[SCHEDULE FIRST] Error parsing combined answer")
+        state["final_answer"] = schedule_answer  # fall back to schedule alone
+    except Exception:  # noqa: BLE001
         logger.exception("[SCHEDULE FIRST] Error combining answers")
         state["final_answer"] = schedule_answer  # fall back to schedule alone
 

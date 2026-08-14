@@ -1,0 +1,129 @@
+# ═══════════════════════════════════════════════════════════════
+#  INSURANCE KEYWORDS
+#  Used to detect if a user's question is insurance-related.
+#
+#  HOW TO EDIT:
+#    - Add one keyword per line
+#    - Lines starting with # are comments (ignored)
+#    - Blank lines are ignored
+#    - After saving changes, restart the application
+#      so the new keywords take effect
+# ═══════════════════════════════════════════════════════════════
+
+# ── Accidents & Injuries ─────────────────────────────────────
+Accident
+Accidental
+Injury
+Serious injury
+Loss of limb
+Loss of hearing
+Loss of sight
+Loss of speech
+Partial disablement
+Total Disablement
+Permanent
+
+# ── Medical ──────────────────────────────────────────────────
+AIDS
+Acquired immune deficiency syndrome
+Opportunistic infection
+Malignant neoplasm
+Hospital
+Hospital confinement
+Medical expenses
+Medical practitioner
+Physician
+Dental expenses
+Sickness
+Serious sickness
+Pre-existing medical condition
+Chronic
+COVID-19
+
+# ── Travel ───────────────────────────────────────────────────
+Trip
+Trip cancellation
+Trip curtailment
+Flight delay
+Baggage
+Passport
+Evacuation
+Repatriation
+Travel companion
+Travel agent
+Overseas
+Expedition
+Major travel event
+Common carrier
+
+# ── Terrorism & Security ────────────────────────────────────
+Act of War
+War
+Acts of Terrorism
+Nuclear terrorism
+Chemical terrorism
+Biological terrorism
+Hostage
+Kidnap
+Civil unrest
+Riot
+Commotion
+Strike
+
+# ── Property & Valuables ────────────────────────────────────
+Jewellery
+Valuables
+Laptop computer
+Golfing equipment
+Household contents
+Stolen
+Payment card
+ATM
+
+# ── Insurance Terms ─────────────────────────────────────────
+Policy
+Premium
+Coverage
+Benefit
+Exclusion
+Deductible
+Endorsement
+Grace period
+Lapse
+Renewal
+Reinstatement
+Sum assured
+Sum insured
+Claim
+Insured Person
+Insolvency
+
+# ── Plan Types & Coverage ───────────────────────────────────
+Area of Cover
+Individual Cover
+Adult and Child Cover
+Family Cover
+Multiple Individuals
+Selected plan
+ERGO Assistance
+ERGO
+Country of residence
+
+# ── Activities ──────────────────────────────────────────────
+Extreme sports
+Sporting activities
+Mountaineering
+Manual work
+
+# ── People ──────────────────────────────────────────────────
+Child
+Children
+Relative
+
+# ── Financial ───────────────────────────────────────────────
+Administrative charges
+Depreciation scale
+Public place
+
+# ── Natural Events ──────────────────────────────────────────
+Natural disasters
