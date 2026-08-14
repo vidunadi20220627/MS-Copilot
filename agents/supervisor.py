@@ -30,6 +30,9 @@ VALID_PRODUCT_CODES = [
     # Extension point: add more product codes here
 ]
 
+# ── Routing reason constants ──────────────────────────────────────────
+REASON_POLICY_NUMBER_FOUND = "policy number found"
+
 # ── Followup indicators ───────────────────────────────────────────────
 # Pronouns and vague references that indicate followup questions
 FOLLOWUP_INDICATORS = [
@@ -284,7 +287,7 @@ def _run_gpt_classification(state: AgentState, question: str, history: List[dict
         messages.append({"role": "user", "content": question})
 
         response = client.chat.completions.create(
-            model="gpt-4o",
+            model="gpt-4o-mini",
             response_format={"type": "json_object"},
             messages=messages
         )
@@ -302,7 +305,7 @@ def _routing_reason(state: AgentState) -> str:
     if not state.get("is_relevant"):
         return "question blocked"
     if state.get("has_policy_no"):
-        return "policy number found"
+        return REASON_POLICY_NUMBER_FOUND
     return "no policy number"
 
 # ── Main Classification ───────────────────────────────────────────────
@@ -369,14 +372,15 @@ def handle_wording_only(state: AgentState) -> AgentState:
     """
     No policy number in question or history
     Get LATEST policy wording from DB
-    Answer in context of conversation history
+    Answer directly from policy wording — no extra GPT call needed,
+    since answer_from_pdf already returns a clear, direct answer.
     """
     logger.info("[WORDING ONLY] Handling wording only question")
     logger.info("[WORDING ONLY] No policy number — fetching latest wording from DB")
 
     history = state.get("conversation_history", [])
-
     debug_mode = state.get("debug_mode", False)
+
     pdf_result = answer_from_pdf(
         question=state["question"],
         policy_no=None,
@@ -392,49 +396,8 @@ def handle_wording_only(state: AgentState) -> AgentState:
         state["resolved_question"] = None
         state["wording_chunks"] = []
 
-    logger.info("[WORDING ONLY] Raw answer: %s...", raw_answer[:200])
-
-    try:
-        messages = [
-            {
-                "role": "system",
-                "content": """You are a helpful ERGO insurance assistant.
-                Answer the user's question naturally and conversationally.
-                Take into account the conversation history for context.
-                If the user refers to something mentioned earlier
-                (like 'that policy' or 'the same coverage')
-                use the history to understand what they mean.
-                Be clear and concise."""
-            }
-        ]
-
-        messages.extend(build_history_for_gpt(history))
-
-        messages.append({
-            "role": "user",
-            "content": f"""
-            Question: {state['question']}
-
-            Information retrieved from policy wording:
-            {raw_answer}
-
-            Please provide a natural conversational answer
-            based on this information and our conversation history.
-            """
-        })
-
-        response = client.chat.completions.create(
-            model="gpt-4o",
-            messages=messages
-        )
-
-        final_answer = response.choices[0].message.content
-        logger.info("[WORDING ONLY] Final answer: %s...", final_answer[:200])
-        state["final_answer"] = final_answer
-
-    except Exception:
-        logger.exception("[WORDING ONLY] Error")
-        state["final_answer"] = raw_answer
+    logger.info("[WORDING ONLY] Final answer: %s...", raw_answer[:200])
+    state["final_answer"] = raw_answer
 
     state["source_used"] = "wording_only"
     state["routing_info"] = state.get("routing_info") or {"route": "wording_only", "reason": "no policy number"}
@@ -442,20 +405,61 @@ def handle_wording_only(state: AgentState) -> AgentState:
 
     return state
 
+def _schedule_answer_insufficient(answer: str) -> bool:
+    """Heuristic: does the schedule answer indicate it couldn't find
+    the information, meaning we should also check the wording?"""
+    if not answer:
+        return True
+    lowered = answer.lower()
+    markers = [
+        "does not mention", "not specify", "not specified",
+        "does not specify", "could not find", "not stated",
+        "not clear from", "does not explicitly", "sorry, i could not",
+    ]
+    return any(m in lowered for m in markers)
+
+
 def handle_wording_and_schedule(state: AgentState) -> AgentState:
     """
-    Policy number found in question or history
-    Get BOTH wording and schedule for that specific policy
-    Answer in context of conversation history
+    Policy number found in question or history.
+    SCHEDULE-FIRST: most policy-specific questions (dates, premium,
+    benefits) can be answered from the schedule alone — no need to
+    also search the full wording PDF and run a merge call every time.
+    Only fall back to wording (+ merge) when the schedule genuinely
+    can't answer it (general terms/definitions/conditions).
     """
     policy_no = state["policy_no"]
     question = state["question"]
     history = state.get("conversation_history", [])
-
-    logger.info("[WORDING AND SCHEDULE] Policy: %s", policy_no)
     debug_mode = state.get("debug_mode", False)
 
-    logger.info("[WORDING AND SCHEDULE] Fetching wording for %s", policy_no)
+    logger.info("[SCHEDULE FIRST] Policy: %s", policy_no)
+
+    schedule_result = answer_from_schedule(
+        question=question,
+        policy_no=policy_no,
+        return_metadata=debug_mode
+    )
+    if debug_mode and isinstance(schedule_result, dict):
+        schedule_answer = schedule_result.get("answer", "")
+        state["schedule_text"] = schedule_result.get("schedule_text")
+    else:
+        schedule_answer = schedule_result if isinstance(schedule_result, str) else ""
+        state["schedule_text"] = None
+
+    logger.info("[SCHEDULE FIRST] Schedule answer: %s...", schedule_answer[:200])
+
+    if not _schedule_answer_insufficient(schedule_answer):
+        # Schedule answered it directly — fast path, skip wording entirely
+        state["final_answer"] = schedule_answer
+        state["resolved_question"] = None
+        state["wording_chunks"] = []
+        state["source_used"] = "schedule"
+        state["routing_info"] = state.get("routing_info") or {"route": "wording_and_schedule", "reason": REASON_POLICY_NUMBER_FOUND}
+        return state
+
+    logger.info("[SCHEDULE FIRST] Schedule insufficient — falling back to wording")
+
     wording_result = answer_from_pdf(
         question=question,
         policy_no=policy_no,
@@ -470,74 +474,48 @@ def handle_wording_and_schedule(state: AgentState) -> AgentState:
         wording_answer = wording_result if isinstance(wording_result, str) else ""
         state["resolved_question"] = None
         state["wording_chunks"] = []
-    logger.info("[WORDING AND SCHEDULE] Wording: %s...", wording_answer[:200])
 
-    logger.info("[WORDING AND SCHEDULE] Fetching schedule for %s", policy_no)
-    schedule_result = answer_from_schedule(
-        question=question,
-        policy_no=policy_no,
-        return_metadata=debug_mode
-    )
-    if debug_mode and isinstance(schedule_result, dict):
-        schedule_answer = schedule_result.get("answer", "")
-        state["schedule_text"] = schedule_result.get("schedule_text")
-    else:
-        schedule_answer = schedule_result if isinstance(schedule_result, str) else ""
-        state["schedule_text"] = None
-    logger.info("[WORDING AND SCHEDULE] Schedule: %s...", schedule_answer[:200])
+    logger.info("[SCHEDULE FIRST] Wording answer: %s...", wording_answer[:200])
 
     try:
         messages = [
             {
                 "role": "system",
-                "content": f"""You are a helpful ERGO insurance assistant.
-                You are discussing policy {policy_no}.
-                Answer naturally and conversationally.
-                Take into account the full conversation history.
-                If user refers to something from earlier in conversation
-                use history to understand what they mean.
-                Combine wording and schedule information into
-                one clear concise answer without repetition."""
+                "content": f"""You are a helpful ERGO insurance assistant discussing policy {policy_no}.
+                You have two pieces of information about this policy: one from the
+                policy schedule (specific figures/dates for this policy) and one from
+                the general policy wording (terms/definitions/conditions).
+
+                Merge them into ONE natural, direct answer.
+                Do NOT label or mention which piece came from which source.
+                Do not repeat information — if both say the same thing, state it once.
+                Prioritize the schedule's specific figures over general wording
+                language when they overlap."""
             }
         ]
-
         messages.extend(build_history_for_gpt(history))
-
         messages.append({
             "role": "user",
             "content": f"""
             Question: {question}
 
-            From Policy Wording:
-            {wording_answer}
+            Source 1 (schedule): {schedule_answer}
 
-            From Policy Schedule ({policy_no}):
-            {schedule_answer}
+            Source 2 (wording): {wording_answer}
 
-            Provide one natural combined answer using
-            conversation history for context.
+            Give one combined, natural answer with no source labels.
             """
         })
 
-        response = client.chat.completions.create(
-            model="gpt-4o",
-            messages=messages
-        )
-
-        final_answer = response.choices[0].message.content
-        logger.info("[WORDING AND SCHEDULE] Final: %s...", final_answer[:200])
-        state["final_answer"] = final_answer
+        response = client.chat.completions.create(model="gpt-4o", messages=messages)
+        state["final_answer"] = response.choices[0].message.content
 
     except Exception:
-        logger.exception("[WORDING AND SCHEDULE] Error combining")
-        state["final_answer"] = (
-            f"From policy wording:\n{wording_answer}\n\n"
-            f"From policy schedule:\n{schedule_answer}"
-        )
+        logger.exception("[SCHEDULE FIRST] Error combining answers")
+        state["final_answer"] = schedule_answer  # fall back to schedule alone
 
     state["source_used"] = "wording_and_schedule"
-    state["routing_info"] = state.get("routing_info") or {"route": "wording_and_schedule", "reason": "policy number found"}
-
+    state["routing_info"] = state.get("routing_info") or {"route": "wording_and_schedule", "reason": REASON_POLICY_NUMBER_FOUND}
     return state
 
 def handle_blocked(state: AgentState) -> AgentState:
