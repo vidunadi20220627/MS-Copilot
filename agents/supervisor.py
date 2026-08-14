@@ -30,6 +30,9 @@ VALID_PRODUCT_CODES = [
     # Extension point: add more product codes here
 ]
 
+# ── Routing reason constants ──────────────────────────────────────────
+REASON_POLICY_NUMBER_FOUND = "policy number found"
+
 # ── Followup indicators ───────────────────────────────────────────────
 # Pronouns and vague references that indicate followup questions
 FOLLOWUP_INDICATORS = [
@@ -302,7 +305,7 @@ def _routing_reason(state: AgentState) -> str:
     if not state.get("is_relevant"):
         return "question blocked"
     if state.get("has_policy_no"):
-        return "policy number found"
+        return REASON_POLICY_NUMBER_FOUND
     return "no policy number"
 
 # ── Main Classification ───────────────────────────────────────────────
@@ -452,7 +455,7 @@ def handle_wording_and_schedule(state: AgentState) -> AgentState:
         state["resolved_question"] = None
         state["wording_chunks"] = []
         state["source_used"] = "schedule"
-        state["routing_info"] = state.get("routing_info") or {"route": "wording_and_schedule", "reason": "policy number found"}
+        state["routing_info"] = state.get("routing_info") or {"route": "wording_and_schedule", "reason": REASON_POLICY_NUMBER_FOUND}
         return state
 
     logger.info("[SCHEDULE FIRST] Schedule insufficient — falling back to wording")
@@ -512,7 +515,7 @@ def handle_wording_and_schedule(state: AgentState) -> AgentState:
         state["final_answer"] = schedule_answer  # fall back to schedule alone
 
     state["source_used"] = "wording_and_schedule"
-    state["routing_info"] = state.get("routing_info") or {"route": "wording_and_schedule", "reason": "policy number found"}
+    state["routing_info"] = state.get("routing_info") or {"route": "wording_and_schedule", "reason": REASON_POLICY_NUMBER_FOUND}
     return state
 
 def handle_blocked(state: AgentState) -> AgentState:
